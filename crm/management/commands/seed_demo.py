@@ -4,9 +4,22 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from crm.models import (
-    Contractor, Customer, Quote, RepairPlan, RepairPlanEnrollment, Site, System, SystemType,
+    Contractor, Customer, Quote, QuoteLine, RepairPlan, RepairPlanEnrollment, Site, System, SystemType,
 )
 from fsm.models import WorkOrder
+from inventory.models import CatalogItem
+
+Kind = CatalogItem.Kind
+CATALOG = [
+    # sku, name, kind, cost, list price, minimum price, on hand
+    ("CAM-DOME-4MP", "4MP Dome Camera", Kind.PART, 100, 200, 150, 6),
+    ("SW-POE-8", "8-Port PoE Switch", Kind.PART, 145, 260, 200, 2),
+    ("NVR-16", "16-Channel NVR", Kind.PART, 480, 820, 650, 1),
+    ("LAB-TECH", "Technician labor, per hour", Kind.LABOR, 45, 95, 80, 0),
+    ("TRIP-STD", "Trip fee", Kind.TRIP_FEE, 30, 75, 60, 0),
+    ("MISC-FUND", "Misc. supplies fund ($100 block)", Kind.MISC, 100, 125, 110, 0),
+    ("MAT-CAT6", "Cat6 cable, 1000 ft", Kind.MATERIAL, 95, 170, 130, 10),
+]
 
 
 class Command(BaseCommand):
@@ -27,6 +40,12 @@ class Command(BaseCommand):
         gold = RepairPlan.objects.create(name="Gold", monthly_rate=20, exclusions="Negligence, acts of God, construction damage.")
         silver = RepairPlan.objects.create(name="Silver", monthly_rate=12, exclusions="Negligence, acts of God, construction damage.")
         bronze = RepairPlan.objects.create(name="Bronze", monthly_rate=6, exclusions="Negligence, acts of God, construction damage.")
+        items = {
+            sku: CatalogItem.objects.create(
+                sku=sku, name=name, kind=kind, unit_cost=cost, list_price=price, min_price=floor, qty_on_hand=stock,
+            )
+            for sku, name, kind, cost, price, floor, stock in CATALOG
+        }
 
         # Direct account with several sites and per-site repair plans
         brightpath = Customer.objects.create(name="Brightpath Academy", status=Customer.Status.CUSTOMER)
@@ -61,8 +80,11 @@ class Command(BaseCommand):
         # A fresh lead with a quote in progress
         lead = Customer.objects.create(name="Summit Property Group", status=Customer.Status.LEAD)
         building = Site.objects.create(customer=lead, name="Building 8", address="500 Commerce Dr", state="IN")
-        quote = Quote.objects.create(site=building, stage=Quote.Stage.QUOTE_SENT, amount=14500, salesperson="Dakota")
+        quote = Quote.objects.create(site=building, stage=Quote.Stage.QUOTE_SENT, salesperson="Dakota")
         quote.system_types.add(types["CCTV"])
+        cctv = types["CCTV"]
+        for sku, qty in [("CAM-DOME-4MP", 8), ("SW-POE-8", 2), ("LAB-TECH", 24), ("TRIP-STD", 2), ("MISC-FUND", 1)]:
+            QuoteLine.objects.create(quote=quote, item=items[sku], quantity=qty, system_type=cctv)
 
         WorkOrder.objects.create(
             wo_type=WorkOrder.Type.SERVICE, site=Site.objects.get(customer=brightpath, site_number=1),

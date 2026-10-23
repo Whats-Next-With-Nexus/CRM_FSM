@@ -1,6 +1,20 @@
+from decimal import ROUND_HALF_UP, Decimal
+
+from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Max
+
+CENTS = Decimal("0.01")
+
+
+def money(value):
+    return Decimal(value).quantize(CENTS, rounding=ROUND_HALF_UP)
+
+
+def plain(quantity):
+    return f"{quantity:f}".rstrip("0").rstrip(".")
 
 
 def next_in_sequence(queryset, field):
@@ -159,6 +173,9 @@ class RepairPlanEnrollment(models.Model):
         return f"{self.plan} @ {self.site.number}"
 
 
+STANDARD_DEPOSIT_PERCENT = Decimal("50")
+
+
 class Quote(models.Model):
     class Stage(models.TextChoices):
         NEW_LEAD = "new_lead", "New Lead"
@@ -168,12 +185,22 @@ class Quote(models.Model):
         SENT_TO_OPS = "sent_to_ops", "Sent to Ops"
         LOST = "lost", "Lost"
 
+    class OpsStatus(models.TextChoices):
+        PENDING = "pending", "Waiting on Ops"
+        ACCEPTED = "accepted", "Accepted by Ops"
+        REFUSED = "refused", "Returned to Sales"
+
+    PRICED_STAGES = (Stage.QUOTE_SENT, Stage.APPROVED, Stage.DEPOSIT, Stage.SENT_TO_OPS)
+
     site = models.ForeignKey(Site, on_delete=models.PROTECT, related_name="quotes")
     quote_number = models.PositiveIntegerField(editable=False)
     stage = models.CharField(max_length=20, choices=Stage.choices, default=Stage.NEW_LEAD)
     system_types = models.ManyToManyField(SystemType, blank=True, help_text="Services the customer wants quoted.")
-    amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    deposit_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    deposit_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=STANDARD_DEPOSIT_PERCENT,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Standard is 50%. Anything lower needs manager approval.",
+    )
     salesperson = models.CharField(max_length=80, blank=True)
     notes = models.TextField(blank=True)
     created = models.DateTimeField(auto_now_add=True)
@@ -185,9 +212,26 @@ class Quote(models.Model):
     )
     permits_required = models.BooleanField(null=True, blank=True, verbose_name="Permits required?")
 
+    exceptions_approved = models.BooleanField(
+        default=False, help_text="Manager sign-off for below-minimum pricing or a deposit under 50%.",
+    )
+    exceptions_signature = models.CharField(max_length=2000, blank=True, editable=False)
+    exceptions_approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, editable=False, related_name="+",
+    )
+
+    ops_status = models.CharField(max_length=20, choices=OpsStatus.choices, blank=True)
+    ops_note = models.TextField(blank=True, help_text="Required when Ops returns a quote: say what is missing.")
+
     class Meta:
         ordering = ["site__customer", "quote_number"]
         constraints = [models.UniqueConstraint(fields=["site", "quote_number"], name="unique_quote_number_per_site")]
+        permissions = [
+            ("view_costs", "Can see costs and margins"),
+            ("approve_exceptions", "Can approve below-minimum pricing and low deposits"),
+            ("decide_intake", "Can accept or return quotes sent to Ops"),
+            ("override_sent_quote", "Can edit a quote after it was sent to Ops"),
+        ]
 
     @property
     def customer(self):
@@ -196,6 +240,81 @@ class Quote(models.Model):
     @property
     def number(self):
         return f"{self.customer.number}-q{self.quote_number:02d}"
+
+    def _total(self, attr):
+        return money(sum((getattr(line, attr) for line in self.lines.all()), Decimal("0")))
+
+    @property
+    def total_price(self):
+        return self._total("line_price")
+
+    @property
+    def total_cost(self):
+        return self._total("line_cost")
+
+    @property
+    def margin(self):
+        return self.total_price - self.total_cost
+
+    @property
+    def margin_percent(self):
+        price = self.total_price
+        return money(self.margin / price * 100) if price else Decimal("0.00")
+
+    @property
+    def deposit_due(self):
+        return money(self.total_price * self.deposit_percent / 100)
+
+    @property
+    def below_floor_lines(self):
+        return [line for line in self.lines.all() if line.below_floor]
+
+    @property
+    def deposit_below_standard(self):
+        return self.deposit_percent < STANDARD_DEPOSIT_PERCENT
+
+    @property
+    def needs_exception_approval(self):
+        return bool(self.below_floor_lines) or self.deposit_below_standard
+
+    def current_signature(self):
+        parts = [f"{line.pk}:{line.quantity}:{line.unit_price}" for line in self.lines.all()]
+        return "|".join(parts + [f"deposit:{self.deposit_percent}"])
+
+    @property
+    def exceptions_ok(self):
+        if not self.needs_exception_approval:
+            return True
+        return self.exceptions_approved and self.exceptions_signature == self.current_signature()
+
+    def exception_problem(self):
+        """Why this quote can't be sent yet, judged on what is saved right now."""
+        if self.exceptions_ok:
+            return None
+        reasons = []
+        if self.below_floor_lines:
+            reasons.append("a line is priced below its minimum")
+        if self.deposit_below_standard:
+            reasons.append(f"the deposit is under {STANDARD_DEPOSIT_PERCENT:g}%")
+        stale = " (the earlier approval no longer matches the current pricing)" if self.exceptions_approved else ""
+        return "Needs manager approval: " + " and ".join(reasons) + stale + "."
+
+    def install_summary(self):
+        lines = [f"Install per quote {self.number}."]
+        for line in self.lines.all():
+            unit = "hr" if line.kind == "labor" else "x"
+            lines.append(f"- {plain(line.quantity)} {unit} {line.description}")
+        return "\n".join(lines)
+
+    def ensure_install_work_order(self):
+        """Ops accepting a quote is what creates its Install work order, never the send itself."""
+        from fsm.models import WorkOrder
+
+        if self.ops_status != self.OpsStatus.ACCEPTED or self.work_orders.exists():
+            return None
+        return WorkOrder.objects.create(
+            wo_type=WorkOrder.Type.INSTALL, site=self.site, quote=self, description=self.install_summary(),
+        )
 
     def clean(self):
         if self.stage == self.Stage.SENT_TO_OPS:
@@ -206,13 +325,104 @@ class Quote(models.Model):
             ] if not ok]
             if missing:
                 raise ValidationError("Can't send to Ops yet. Still needed: " + ", ".join(missing) + ".")
+        # an approved quote is re-checked after its lines are saved, since the sign-off is stamped then
+        if self.pk and self.stage in self.PRICED_STAGES and not self.exceptions_approved and (problem := self.exception_problem()):
+            raise ValidationError(problem)
+        if self.ops_status == self.OpsStatus.REFUSED and not self.ops_note.strip():
+            raise ValidationError("Say what is missing when returning a quote to Sales.")
+        if self.ops_status == self.OpsStatus.ACCEPTED and self.stage != self.Stage.SENT_TO_OPS:
+            raise ValidationError("Only a quote that was sent to Ops can be accepted.")
 
     def save(self, *args, **kwargs):
         if not self.quote_number:
             # numbered per customer across all of its sites, so the site is never baked into the number
             siblings = Quote.objects.filter(site__customer=self.site.customer)
             self.quote_number = next_in_sequence(siblings, "quote_number")
+        if self.stage == self.Stage.SENT_TO_OPS and self.ops_status in ("", self.OpsStatus.REFUSED):
+            self.ops_status = self.OpsStatus.PENDING
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.number} ({self.site.name or self.site.address})"
+
+
+class QuoteLine(models.Model):
+    """One priced row. Cost and minimum price are copied from the catalog at quote time and then stay fixed."""
+
+    quote = models.ForeignKey(Quote, on_delete=models.CASCADE, related_name="lines")
+    item = models.ForeignKey("inventory.CatalogItem", on_delete=models.PROTECT)
+    system_type = models.ForeignKey(
+        SystemType, on_delete=models.PROTECT, null=True, blank=True, help_text="Which system this line is for.",
+    )
+    description = models.CharField(max_length=200, blank=True, help_text="Leave blank to use the catalog name.")
+    quantity = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal("1"), validators=[MinValueValidator(Decimal("0.01"))],
+        help_text="Units, or hours for labor.",
+    )
+    unit_price = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, help_text="Leave blank for the list price.",
+    )
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, editable=False)
+    unit_min_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, editable=False)
+
+    class Meta:
+        ordering = ["id"]
+
+    @property
+    def kind(self):
+        return self.item.kind
+
+    @property
+    def line_cost(self):
+        return money((self.unit_cost or 0) * self.quantity)
+
+    @property
+    def line_price(self):
+        return money((self.unit_price or 0) * self.quantity)
+
+    @property
+    def line_margin(self):
+        return self.line_price - self.line_cost
+
+    @property
+    def below_floor(self):
+        return self.unit_min_price is not None and self.unit_price is not None and self.unit_price < self.unit_min_price
+
+    def save(self, *args, **kwargs):
+        if self.unit_cost is None:
+            self.unit_cost = self.item.unit_cost
+        if self.unit_min_price is None:
+            self.unit_min_price = self.item.min_price
+        if self.unit_price is None:
+            self.unit_price = self.item.list_price
+        self.description = self.description or self.item.name
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{plain(self.quantity)} x {self.description or self.item.name}"
+
+
+class Notification(models.Model):
+    """An in-app alert for everyone in a group, shown until someone acknowledges it."""
+
+    group = models.ForeignKey("auth.Group", on_delete=models.CASCADE, related_name="notifications")
+    message = models.CharField(max_length=300)
+    quote = models.ForeignKey(Quote, on_delete=models.SET_NULL, null=True, blank=True, related_name="notifications")
+    created = models.DateTimeField(auto_now_add=True)
+    acknowledged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created"]
+
+    def __str__(self):
+        return self.message
+
+
+def notify(group_names, message, quote=None):
+    from django.contrib.auth.models import Group
+
+    for group in Group.objects.filter(name__in=group_names):
+        Notification.objects.create(group=group, message=message[:300], quote=quote)

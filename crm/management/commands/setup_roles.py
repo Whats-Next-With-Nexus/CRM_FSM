@@ -4,43 +4,47 @@ from django.core.management.base import BaseCommand
 VIEW = ("view",)
 EDIT = ("add", "change", "view")
 FULL = ("add", "change", "delete", "view")
+REVIEW = ("change", "view")
 
-# role -> {(app, model): actions}. Extras beyond a role are granted per user in the admin.
+SALES = {
+    ("crm", "customer"): EDIT, ("crm", "site"): EDIT, ("crm", "quote"): EDIT, ("crm", "quoteline"): EDIT,
+    ("crm", "system"): VIEW, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
+    ("crm", "repairplanenrollment"): VIEW, ("inventory", "catalogitem"): VIEW, ("crm", "notification"): REVIEW,
+    ("fsm", "workorder"): VIEW, ("fsm", "visit"): VIEW,
+}
+MANAGER = {
+    ("crm", "customer"): VIEW, ("crm", "site"): VIEW, ("crm", "quote"): REVIEW, ("crm", "quoteline"): VIEW,
+    ("crm", "system"): EDIT, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
+    ("crm", "repairplanenrollment"): VIEW, ("inventory", "catalogitem"): EDIT, ("crm", "notification"): REVIEW,
+    ("fsm", "workorder"): EDIT, ("fsm", "visit"): FULL,
+}
+MANAGER_EXTRAS = [("crm", "quote", "view_costs"), ("crm", "quote", "approve_exceptions"), ("crm", "quote", "decide_intake")]
+
+# role -> (model permissions, extra custom permissions). Anything beyond a role is granted per user in the admin.
 ROLES = {
-    "Sales": {
-        ("crm", "customer"): EDIT, ("crm", "site"): EDIT, ("crm", "quote"): EDIT,
-        ("crm", "system"): VIEW, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
-        ("crm", "repairplanenrollment"): VIEW,
-        ("fsm", "workorder"): VIEW, ("fsm", "visit"): VIEW,
-    },
-    "Technician": {
+    "Sales": (SALES, []),
+    "Sales Manager": (SALES, [("crm", "quote", "view_costs"), ("crm", "quote", "approve_exceptions")]),
+    "Technician": ({
         ("crm", "customer"): VIEW, ("crm", "site"): VIEW, ("crm", "system"): VIEW,
         ("crm", "repairplanenrollment"): VIEW,
         ("fsm", "workorder"): VIEW, ("fsm", "visit"): VIEW,
-    },
-    "Install Manager": {
-        ("crm", "customer"): VIEW, ("crm", "site"): VIEW, ("crm", "quote"): VIEW,
-        ("crm", "system"): EDIT, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
-        ("crm", "repairplanenrollment"): VIEW,
-        ("fsm", "workorder"): EDIT, ("fsm", "visit"): FULL,
-    },
-    "Operations Manager": {
-        ("crm", "customer"): EDIT, ("crm", "site"): EDIT, ("crm", "quote"): VIEW,
-        ("crm", "system"): EDIT, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
-        ("crm", "repairplanenrollment"): EDIT, ("crm", "contractor"): FULL,
-        ("fsm", "workorder"): EDIT, ("fsm", "visit"): FULL,
-    },
+    }, []),
+    "Install Manager": (MANAGER, MANAGER_EXTRAS),
+    "Operations Manager": (
+        {**MANAGER, ("crm", "customer"): EDIT, ("crm", "site"): EDIT, ("crm", "repairplanenrollment"): EDIT,
+         ("crm", "contractor"): FULL},
+        MANAGER_EXTRAS + [("fsm", "workorder", "manage_subcontract")],
+    ),
 }
-EXTRA = {"Operations Manager": [("fsm", "workorder", "manage_subcontract")]}
 
 
 class Command(BaseCommand):
     help = "Create or reset the role groups (safe to re-run; it rewrites each role's permissions)."
 
     def handle(self, *args, **options):
-        for role, models in ROLES.items():
+        for role, (models, extras) in ROLES.items():
             codenames = [(app, f"{action}_{model}") for (app, model), actions in models.items() for action in actions]
-            codenames += [(app, code) for app, _model, code in EXTRA.get(role, [])]
+            codenames += [(app, code) for app, _model, code in extras]
             perms = [Permission.objects.get(content_type__app_label=app, codename=code) for app, code in codenames]
             group, _ = Group.objects.get_or_create(name=role)
             group.permissions.set(perms)
