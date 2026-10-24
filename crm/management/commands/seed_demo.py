@@ -1,7 +1,8 @@
-from datetime import date
+from datetime import date, timedelta
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.utils import timezone
 
 from crm.models import (
     Contractor, Customer, Quote, QuoteLine, RepairPlan, RepairPlanEnrollment, Site, System, SystemType,
@@ -78,9 +79,15 @@ class Command(BaseCommand):
         )
 
         # A fresh lead with a quote in progress
-        lead = Customer.objects.create(name="Summit Property Group", status=Customer.Status.LEAD)
-        building = Site.objects.create(customer=lead, name="Building 8", address="500 Commerce Dr", state="IN")
-        quote = Quote.objects.create(site=building, stage=Quote.Stage.QUOTE_SENT, salesperson="Dakota")
+        lead = Customer.objects.create(
+            name="Summit Property Group", status=Customer.Status.LEAD, lead_source=Customer.LeadSource.REFERRAL,
+            contact_name="Pat Morgan", phone="317-555-0142", email="pat@example.com",
+        )
+        building = Site.objects.create(customer=lead, name="Building 8", address="500 Commerce Dr", city="Indianapolis", state="IN")
+        quote = Quote.objects.create(
+            site=building, stage=Quote.Stage.QUOTE_SENT, salesperson="Dakota",
+            follow_up_on=timezone.localdate() + timedelta(days=3),
+        )
         quote.system_types.add(types["CCTV"])
         cctv = types["CCTV"]
         for sku, qty in [("CAM-DOME-4MP", 8), ("SW-POE-8", 2), ("LAB-TECH", 24), ("TRIP-STD", 2), ("MISC-FUND", 1)]:

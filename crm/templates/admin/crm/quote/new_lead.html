@@ -1,0 +1,29 @@
+{% extends "admin/base_site.html" %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a> &rsaquo;
+  <a href="{% url 'admin:crm_quote_changelist' %}">Quotes</a> &rsaquo; New lead
+</div>
+{% endblock %}
+{% block content %}
+<p>This creates the customer, their first site and a draft quote in one step. Add line items on the next screen.</p>
+<form method="post">{% csrf_token %}
+  {% if form.non_field_errors %}<p class="errornote">{{ form.non_field_errors }}</p>{% endif %}
+  {% for title, fields in form.grouped %}
+  <fieldset class="module aligned">
+    <h2>{{ title }}</h2>
+    {% for field in fields %}
+    <div class="form-row{% if field.errors %} errors{% endif %}">
+      {{ field.errors }}
+      <div>
+        {{ field.label_tag }}
+        {{ field }}
+        {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+  <div class="submit-row"><input type="submit" value="Create lead" class="default"></div>
+</form>
+{% endblock %}

@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.conf import settings
@@ -5,6 +6,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Max
+from django.utils import timezone
 
 CENTS = Decimal("0.01")
 
@@ -41,8 +43,17 @@ class Customer(models.Model):
         LOST = "lost", "Lost"
         INACTIVE = "inactive", "Inactive"
 
+    class LeadSource(models.TextChoices):
+        REFERRAL = "referral", "Referral"
+        WEBSITE = "website", "Website"
+        COLD_CALL = "cold_call", "Cold call / canvassing"
+        EXISTING = "existing", "Existing customer"
+        CONTRACTOR = "contractor", "Contractor"
+        OTHER = "other", "Other"
+
     name = models.CharField(max_length=200)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.LEAD)
+    lead_source = models.CharField(max_length=20, choices=LeadSource.choices, blank=True)
     contracted_through = models.ForeignKey(
         Contractor, on_delete=models.PROTECT, related_name="customers", null=True, blank=True,
         help_text="Leave blank for Direct (in-house) customers.",
@@ -68,6 +79,23 @@ class Customer(models.Model):
     @property
     def contracted_label(self):
         return str(self.contracted_through) if self.contracted_through else "Direct"
+
+    def sync_status(self):
+        """A lead becomes a customer once any quote is approved; a lead whose quotes are all lost is Lost."""
+        if self.status == self.Status.INACTIVE:
+            return
+        stages = list(Quote.objects.filter(site__customer=self).values_list("stage", flat=True))
+        if any(stage in Quote.WON_STAGES for stage in stages):
+            new = self.Status.CUSTOMER
+        elif self.status == self.Status.CUSTOMER:
+            return
+        elif stages and all(stage == Quote.Stage.LOST for stage in stages):
+            new = self.Status.LOST
+        else:
+            new = self.Status.LEAD
+        if new != self.status:
+            self.status = new
+            self.save(update_fields=["status"])
 
     def __str__(self):
         return f"{self.name} ({self.number})"
@@ -190,7 +218,15 @@ class Quote(models.Model):
         ACCEPTED = "accepted", "Accepted by Ops"
         REFUSED = "refused", "Returned to Sales"
 
+    class LostReason(models.TextChoices):
+        PRICE = "price", "Price too high"
+        COMPETITOR = "competitor", "Went with a competitor"
+        CANCELLED = "cancelled", "Project cancelled or postponed"
+        NO_RESPONSE = "no_response", "No response"
+        OTHER = "other", "Other"
+
     PRICED_STAGES = (Stage.QUOTE_SENT, Stage.APPROVED, Stage.DEPOSIT, Stage.SENT_TO_OPS)
+    WON_STAGES = (Stage.APPROVED, Stage.DEPOSIT, Stage.SENT_TO_OPS)
 
     site = models.ForeignKey(Site, on_delete=models.PROTECT, related_name="quotes")
     quote_number = models.PositiveIntegerField(editable=False)
@@ -204,9 +240,18 @@ class Quote(models.Model):
     salesperson = models.CharField(max_length=80, blank=True)
     notes = models.TextField(blank=True)
     created = models.DateTimeField(auto_now_add=True)
+    follow_up_on = models.DateField(null=True, blank=True, help_text="Next time to reach out to the customer.")
+    sent_on = models.DateTimeField(null=True, blank=True, editable=False)
+    valid_until = models.DateField(null=True, blank=True, help_text="Filled in when the quote is sent.")
+    lost_reason = models.CharField(max_length=20, choices=LostReason.choices, blank=True)
+    lost_note = models.TextField(blank=True)
 
     agreement_signed = models.BooleanField(default=False)
+    signed_by = models.CharField(max_length=120, blank=True, help_text="Who signed for the customer.")
+    agreement_signed_on = models.DateField(null=True, blank=True)
     deposit_received = models.BooleanField(default=False)
+    deposit_received_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    deposit_received_on = models.DateField(null=True, blank=True)
     deliverables_verified = models.BooleanField(
         default=False, help_text="Permits, vendor certs, anything the company itself owes before work starts.",
     )
@@ -316,11 +361,39 @@ class Quote(models.Model):
             wo_type=WorkOrder.Type.INSTALL, site=self.site, quote=self, description=self.install_summary(),
         )
 
+    def stage_problem(self):
+        """Problems that depend on the saved line items. Returns (message, stage to fall back to) or None."""
+        if self.stage not in self.PRICED_STAGES:
+            return None
+        if not self.lines.exists():
+            return "Add at least one line item before sending the quote. The quote was moved back to New Lead.", self.Stage.NEW_LEAD
+        if problem := self.exception_problem():
+            return f"{problem} The quote was moved back to New Lead.", self.Stage.NEW_LEAD
+        if (
+            self.stage in (self.Stage.DEPOSIT, self.Stage.SENT_TO_OPS)
+            and self.deposit_received_amount is not None
+            and self.deposit_received_amount < self.deposit_due
+        ):
+            return (
+                f"The deposit received (${self.deposit_received_amount:,.2f}) is less than the deposit due "
+                f"(${self.deposit_due:,.2f}). The quote was moved back to Approved.",
+                self.Stage.APPROVED,
+            )
+        return None
+
     def clean(self):
+        if self.stage in self.WON_STAGES and not self.sent_on:
+            raise ValidationError("Send the quote (Quote Sent) before moving it forward.")
+        if self.stage == self.Stage.LOST and not self.lost_reason:
+            raise ValidationError("Pick a reason this quote was lost.")
+        if self.agreement_signed and not self.signed_by.strip():
+            raise ValidationError("Enter who signed the agreement.")
+        if self.stage == self.Stage.DEPOSIT and not (self.deposit_received and self.deposit_received_amount):
+            raise ValidationError("Record the deposit: tick Deposit received and enter the amount.")
         if self.stage == self.Stage.SENT_TO_OPS:
             missing = [label for ok, label in [
                 (self.agreement_signed, "agreement signed"),
-                (self.deposit_received, "deposit received"),
+                (self.deposit_received and self.deposit_received_amount, "deposit received with its amount"),
                 (self.deliverables_verified, "deliverables verified"),
             ] if not ok]
             if missing:
@@ -340,7 +413,16 @@ class Quote(models.Model):
             self.quote_number = next_in_sequence(siblings, "quote_number")
         if self.stage == self.Stage.SENT_TO_OPS and self.ops_status in ("", self.OpsStatus.REFUSED):
             self.ops_status = self.OpsStatus.PENDING
+        today = timezone.localdate()
+        if self.stage == self.Stage.QUOTE_SENT and not self.sent_on:
+            self.sent_on = timezone.now()
+            self.valid_until = self.valid_until or today + timedelta(days=settings.QUOTE_VALID_DAYS)
+        if self.agreement_signed and not self.agreement_signed_on:
+            self.agreement_signed_on = today
+        if self.deposit_received and not self.deposit_received_on:
+            self.deposit_received_on = today
         super().save(*args, **kwargs)
+        self.customer.sync_status()
 
     def __str__(self):
         return f"{self.number} ({self.site.name or self.site.address})"

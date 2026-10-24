@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -24,6 +25,13 @@ SECRET_KEY = 'django-insecure-)3@!qb8j9frx73qfzuk)s0tfyjsg9h2yoqx$5bj457=^)jeyzd
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
+
+COMPANY_NAME = os.environ.get("COMPANY_NAME", "Your Company Name")
+QUOTE_VALID_DAYS = 30
+QUOTE_TERMS = (
+    "Pricing is valid until the date shown. A deposit is due on acceptance and work is scheduled once it is received. "
+    "Changes to the scope after acceptance require a signed change order."
+)
 
 ALLOWED_HOSTS = []
 

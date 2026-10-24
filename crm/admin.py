@@ -1,6 +1,15 @@
-from django.contrib import admin, messages
-from django.utils import timezone
+from datetime import timedelta
 
+from django.conf import settings
+from django.contrib import admin, messages
+from django.core.exceptions import PermissionDenied
+from django.shortcuts import get_object_or_404, redirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
+from django.utils import timezone
+from django.utils.html import format_html
+
+from .forms import NewLeadForm
 from .models import (
     Contractor, Customer, Notification, Quote, QuoteLine, RepairPlan, RepairPlanEnrollment, Site, System, SystemType,
     notify,
@@ -61,8 +70,8 @@ class SiteInline(admin.TabularInline):
 
 @admin.register(Customer)
 class CustomerAdmin(ContractInfoMixin, admin.ModelAdmin):
-    list_display = ("name", "number", "status", "contracted_label", "contact_name", "phone")
-    list_filter = ("status", "contracted_through")
+    list_display = ("name", "number", "status", "lead_source", "contracted_label", "contact_name", "phone")
+    list_filter = ("status", "lead_source", "contracted_through")
     contract_columns = ("contracted_label",)
     contract_filters = ("contracted_through",)
     search_fields = ("name", "contact_name", "sites__address", "sites__name")
@@ -120,8 +129,9 @@ class RepairPlanAdmin(admin.ModelAdmin):
 SALES_GROUPS = ("Sales", "Sales Manager")
 OPS_GROUPS = ("Install Manager", "Operations Manager")
 EDITABLE_QUOTE_FIELDS = (
-    "site", "stage", "system_types", "salesperson", "notes", "deposit_percent", "agreement_signed",
-    "deposit_received", "deliverables_verified", "permits_required", "exceptions_approved",
+    "site", "stage", "system_types", "salesperson", "follow_up_on", "notes", "valid_until", "deposit_percent",
+    "agreement_signed", "signed_by", "agreement_signed_on", "deposit_received", "deposit_received_amount",
+    "deposit_received_on", "deliverables_verified", "permits_required", "exceptions_approved", "lost_reason", "lost_note",
 )
 
 
@@ -182,14 +192,74 @@ class QuoteLineInline(admin.TabularInline):
         return super().has_delete_permission(request, obj) and not self._locked(request, obj)
 
 
+class FollowUpFilter(admin.SimpleListFilter):
+    title = "follow-up"
+    parameter_name = "follow_up"
+
+    def lookups(self, request, model_admin):
+        return [("overdue", "Overdue"), ("today", "Due today"), ("week", "Due this week"), ("none", "None set")]
+
+    def queryset(self, request, queryset):
+        today = timezone.localdate()
+        open_quotes = queryset.exclude(stage__in=[Quote.Stage.LOST, Quote.Stage.SENT_TO_OPS])
+        match self.value():
+            case "overdue":
+                return open_quotes.filter(follow_up_on__lt=today)
+            case "today":
+                return open_quotes.filter(follow_up_on=today)
+            case "week":
+                return open_quotes.filter(follow_up_on__range=(today, today + timedelta(days=7)))
+            case "none":
+                return open_quotes.filter(follow_up_on__isnull=True)
+        return queryset
+
+
 @admin.register(Quote)
 class QuoteAdmin(admin.ModelAdmin):
-    list_display = ("number", "site", "stage", "ops_status", "price_total", "margin_pct", "salesperson", "created")
-    list_filter = ("stage", "ops_status", "salesperson")
+    list_display = ("number", "site", "stage", "ops_status", "price_total", "margin_pct", "follow_up_on", "salesperson", "created")
+    list_filter = ("stage", "ops_status", FollowUpFilter, "salesperson", "lost_reason")
     search_fields = ("site__address", "site__customer__name")
     filter_horizontal = ("system_types",)
     inlines = [QuoteLineInline]
     cost_columns = ("margin_pct",)
+
+    def get_urls(self):
+        custom = [
+            path("new-lead/", self.admin_site.admin_view(self.new_lead_view), name="crm_quote_new_lead"),
+            path("<int:pk>/document/", self.admin_site.admin_view(self.document_view), name="crm_quote_document"),
+        ]
+        return custom + super().get_urls()
+
+    def new_lead_view(self, request):
+        needed = ("crm.add_customer", "crm.add_site", "crm.add_quote")
+        if not all(request.user.has_perm(p) for p in needed):
+            raise PermissionDenied
+        initial = {"salesperson": request.user.get_full_name() or request.user.get_username()}
+        form = NewLeadForm(request.POST or None, initial=initial)
+        if request.method == "POST" and form.is_valid():
+            quote = form.save()
+            self.message_user(
+                request, f"Lead created: {quote.customer.number}, {quote.number}. Add line items below.", messages.SUCCESS,
+            )
+            return redirect("admin:crm_quote_change", quote.pk)
+        context = {**self.admin_site.each_context(request), "title": "New lead", "form": form, "opts": self.model._meta}
+        return TemplateResponse(request, "admin/crm/quote/new_lead.html", context)
+
+    def document_view(self, request, pk):
+        quote = get_object_or_404(Quote.objects.select_related("site__customer"), pk=pk)
+        if not self.has_view_permission(request, quote):
+            raise PermissionDenied
+        context = {
+            "quote": quote,
+            "customer": quote.customer,
+            "site": quote.site,
+            "lines": quote.lines.select_related("item"),
+            "system_types": quote.system_types.all(),
+            "company_name": settings.COMPANY_NAME,
+            "terms": settings.QUOTE_TERMS,
+            "is_draft": quote.stage == Quote.Stage.NEW_LEAD,
+        }
+        return TemplateResponse(request, "crm/quote_document.html", context)
 
     def get_list_display(self, request):
         columns = super().get_list_display(request)
@@ -201,14 +271,30 @@ class QuoteAdmin(admin.ModelAdmin):
             pricing += ["cost_total", "margin_total", "margin_pct"]
         pricing += ["deposit_percent", "deposit_amount_due", "exceptions_note", "exceptions_approved"]
         return (
-            (None, {"fields": ("number", "site", "stage", "system_types", "salesperson", "notes")}),
+            (None, {"fields": (
+                "number", "site", "stage", "system_types", "salesperson", "follow_up_on", "notes", "sent_on", "valid_until",
+                "document_link",
+            )}),
             ("Pricing (save to refresh totals)", {"fields": pricing}),
-            ("Sent to Ops checklist", {"fields": ("agreement_signed", "deposit_received", "deliverables_verified", "permits_required")}),
+            ("Agreement, deposit and Sent to Ops checklist", {"fields": (
+                "agreement_signed", "signed_by", "agreement_signed_on", "deposit_received", "deposit_received_amount",
+                "deposit_received_on", "deliverables_verified", "permits_required",
+            )}),
+            ("If the quote is lost", {"fields": ("lost_reason", "lost_note"), "classes": ("collapse",)}),
             ("Ops intake", {"fields": ("ops_status", "ops_note")}),
         )
 
+    @admin.display(description="Printable quote")
+    def document_link(self, obj):
+        if not obj.pk:
+            return "Save the quote first."
+        return format_html('<a href="{}" target="_blank">Open the customer copy</a>', reverse("admin:crm_quote_document", args=[obj.pk]))
+
     def get_readonly_fields(self, request, obj=None):
-        fields = ["number", "price_total", "cost_total", "margin_total", "margin_pct", "deposit_amount_due", "exceptions_note"]
+        fields = [
+            "number", "sent_on", "document_link", "price_total", "cost_total", "margin_total", "margin_pct",
+            "deposit_amount_due", "exceptions_note",
+        ]
         user = request.user
         if not user.has_perm("crm.approve_exceptions"):
             fields.append("exceptions_approved")
@@ -263,10 +349,15 @@ class QuoteAdmin(admin.ModelAdmin):
             quote.exceptions_approved_by = user
             quote.save(update_fields=["exceptions_signature", "exceptions_approved_by"])
 
-        if quote.stage in Quote.PRICED_STAGES and (problem := quote.exception_problem()):
-            Quote.objects.filter(pk=quote.pk).update(stage=Quote.Stage.NEW_LEAD)
-            quote.stage = Quote.Stage.NEW_LEAD
-            self.message_user(request, f"{problem} The quote was moved back to New Lead.", messages.ERROR)
+        if problem := quote.stage_problem():
+            message, fallback = problem
+            reset = {"stage": fallback}
+            if fallback == Quote.Stage.NEW_LEAD:
+                reset |= {"sent_on": None, "valid_until": None}
+            Quote.objects.filter(pk=quote.pk).update(**reset)
+            quote.refresh_from_db()
+            quote.customer.sync_status()
+            self.message_user(request, message, messages.ERROR)
             return
 
         if before == Quote.Stage.SENT_TO_OPS:
