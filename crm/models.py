@@ -4,7 +4,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Max
 from django.utils import timezone
 
@@ -267,6 +267,7 @@ class Quote(models.Model):
 
     ops_status = models.CharField(max_length=20, choices=OpsStatus.choices, blank=True)
     ops_note = models.TextField(blank=True, help_text="Required when Ops returns a quote: say what is missing.")
+    revision = models.PositiveIntegerField(default=1, editable=False)
 
     class Meta:
         ordering = ["site__customer", "quote_number"]
@@ -276,6 +277,7 @@ class Quote(models.Model):
             ("approve_exceptions", "Can approve below-minimum pricing and low deposits"),
             ("decide_intake", "Can accept or return quotes sent to Ops"),
             ("override_sent_quote", "Can edit a quote after it was sent to Ops"),
+            ("revise_quote", "Can revise a sent quote before install begins"),
         ]
 
     @property
@@ -344,22 +346,84 @@ class Quote(models.Model):
         stale = " (the earlier approval no longer matches the current pricing)" if self.exceptions_approved else ""
         return "Needs manager approval: " + " and ".join(reasons) + stale + "."
 
+    @property
+    def install_begun(self):
+        """True once the first visit of an Install work order has been started."""
+        return self.work_orders.filter(wo_type="install", visits__started_at__isnull=False).exists()
+
+    @property
+    def signed_change_orders(self):
+        return [co for co in self.change_orders.all() if co.status == ChangeOrder.Status.SIGNED]
+
+    @property
+    def current_value(self):
+        """Original total plus signed change orders, except ones marked absorbed."""
+        extra = sum((co.net_price for co in self.signed_change_orders if co.billing == ChangeOrder.Billing.INVOICE), Decimal("0"))
+        return money(self.total_price + extra)
+
     def install_summary(self):
-        lines = [f"Install per quote {self.number}."]
+        title = f"Install per quote {self.number}" + (f", revision {self.revision}." if self.revision > 1 else ".")
+        lines = [title]
         for line in self.lines.all():
             unit = "hr" if line.kind == "labor" else "x"
             lines.append(f"- {plain(line.quantity)} {unit} {line.description}")
         return "\n".join(lines)
 
     def ensure_install_work_order(self):
-        """Ops accepting a quote is what creates its Install work order, never the send itself."""
+        """Ops accepting a quote creates its Install work order, or refreshes the scope if one already exists."""
         from fsm.models import WorkOrder
 
-        if self.ops_status != self.OpsStatus.ACCEPTED or self.work_orders.exists():
+        if self.ops_status != self.OpsStatus.ACCEPTED:
             return None
-        return WorkOrder.objects.create(
-            wo_type=WorkOrder.Type.INSTALL, site=self.site, quote=self, description=self.install_summary(),
-        )
+        work_order = self.work_orders.filter(wo_type=WorkOrder.Type.INSTALL).first()
+        summary = self.install_summary()
+        if work_order is None:
+            return WorkOrder.objects.create(wo_type=WorkOrder.Type.INSTALL, site=self.site, quote=self, description=summary)
+        if work_order.description != summary:
+            work_order.description = summary
+            work_order.save(update_fields=["description"])
+        return work_order
+
+    def snapshot(self):
+        """A frozen copy of what the customer was shown, kept when the quote is revised."""
+        return {
+            "revision": self.revision,
+            "stage": self.stage,
+            "sent_on": self.sent_on.isoformat() if self.sent_on else None,
+            "valid_until": self.valid_until.isoformat() if self.valid_until else None,
+            "deposit_percent": str(self.deposit_percent),
+            "total": str(self.total_price),
+            "deposit_due": str(self.deposit_due),
+            "signed_by": self.signed_by,
+            "agreement_signed_on": self.agreement_signed_on.isoformat() if self.agreement_signed_on else None,
+            "system_types": [t.name for t in self.system_types.all()],
+            "lines": [
+                {
+                    "description": line.description, "quantity": str(line.quantity),
+                    "unit_price": str(line.unit_price), "amount": str(line.line_price),
+                }
+                for line in self.lines.all()
+            ],
+        }
+
+    def revise(self, user, reason=""):
+        """Reopen a sent quote for changes before install begins. The old version is kept and a new signature is needed."""
+        if self.install_begun:
+            raise ValidationError(
+                "Install has begun. Changes to the original scope need a change order, and new equipment needs a new quote."
+            )
+        if not self.sent_on or self.stage == self.Stage.LOST:
+            raise ValidationError("Only a quote that has been sent can be revised.")
+        with transaction.atomic():
+            QuoteRevision.objects.create(
+                quote=self, revision=self.revision, reason=reason, created_by=user, snapshot=self.snapshot(),
+            )
+            self.revision += 1
+            self.stage = self.Stage.NEW_LEAD
+            self.sent_on = self.valid_until = self.agreement_signed_on = None
+            self.agreement_signed, self.signed_by = False, ""
+            self.ops_status, self.ops_note = "", ""
+            self.save()
 
     def stage_problem(self):
         """Problems that depend on the saved line items. Returns (message, stage to fall back to) or None."""
@@ -508,3 +572,232 @@ def notify(group_names, message, quote=None):
 
     for group in Group.objects.filter(name__in=group_names):
         Notification.objects.create(group=group, message=message[:300], quote=quote)
+
+
+class QuoteRevision(models.Model):
+    """An earlier version of a quote, frozen when it was revised."""
+
+    quote = models.ForeignKey(Quote, on_delete=models.CASCADE, related_name="revisions")
+    revision = models.PositiveIntegerField()
+    reason = models.TextField(blank=True)
+    snapshot = models.JSONField()
+    created = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
+
+    class Meta:
+        ordering = ["revision"]
+        constraints = [models.UniqueConstraint(fields=["quote", "revision"], name="one_snapshot_per_revision")]
+
+    def __str__(self):
+        return f"{self.quote.number} revision {self.revision}"
+
+
+class ChangeOrder(models.Model):
+    """A signed change to the original scope after install has begun. Money differences never need a new deposit."""
+
+    class Status(models.TextChoices):
+        REQUESTED = "requested", "Requested"
+        PRICED = "priced", "Ready for customer"
+        SIGNED = "signed", "Signed by customer"
+        DECLINED = "declined", "Declined by customer"
+
+    class Billing(models.TextChoices):
+        INVOICE = "invoice", "Add the difference to the final invoice"
+        ABSORB = "absorb", "Absorb the difference"
+
+    quote = models.ForeignKey(Quote, on_delete=models.PROTECT, related_name="change_orders")
+    co_number = models.PositiveIntegerField(editable=False)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.REQUESTED)
+    reason = models.TextField(help_text="What changed on site and why.")
+    billing = models.CharField(max_length=20, choices=Billing.choices, default=Billing.INVOICE)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, editable=False, related_name="+",
+    )
+    exceptions_approved = models.BooleanField(default=False, help_text="Manager sign-off for added items priced below their minimum.")
+    exceptions_signature = models.CharField(max_length=2000, blank=True, editable=False)
+    exceptions_approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, editable=False, related_name="+",
+    )
+    signed_by = models.CharField(max_length=120, blank=True, help_text="Who signed for the customer.")
+    signed_on = models.DateField(null=True, blank=True)
+    applied_at = models.DateTimeField(null=True, blank=True, editable=False)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["quote", "co_number"]
+        constraints = [models.UniqueConstraint(fields=["quote", "co_number"], name="unique_co_number_per_quote")]
+        permissions = [("set_restocking", "Can set restocking fees on returned items")]
+
+    @property
+    def number(self):
+        return f"{self.quote.number}-CO{self.co_number}" if self.pk else "(new)"
+
+    @property
+    def removed_lines(self):
+        return [line for line in self.lines.all() if line.direction == ChangeOrderLine.Direction.REMOVE]
+
+    @property
+    def added_lines(self):
+        return [line for line in self.lines.all() if line.direction == ChangeOrderLine.Direction.ADD]
+
+    @property
+    def net_price(self):
+        return money(sum((line.amount for line in self.lines.all()), Decimal("0")))
+
+    @property
+    def net_cost(self):
+        return money(sum((line.cost_effect for line in self.lines.all()), Decimal("0")))
+
+    @property
+    def margin_change(self):
+        return self.net_price - self.net_cost
+
+    @property
+    def below_floor_lines(self):
+        return [line for line in self.added_lines if line.below_floor]
+
+    def current_signature(self):
+        parts = [f"{line.pk}:{line.direction}:{line.quantity}:{line.unit_price}" for line in self.lines.all()]
+        return "|".join(parts)
+
+    @property
+    def exceptions_ok(self):
+        if not self.below_floor_lines:
+            return True
+        return self.exceptions_approved and self.exceptions_signature == self.current_signature()
+
+    def line_problem(self):
+        original = {line.pk: line for line in self.quote.lines.all()}
+        for line in self.removed_lines:
+            source = original.get(line.quote_line_id)
+            if source is None:
+                return "A returned line must come from this quote."
+            if line.quantity > source.quantity:
+                return f"Can't return {plain(line.quantity)} of {source.description}; the quote has {plain(source.quantity)}."
+        return None
+
+    def stage_problem(self):
+        """Why this change order can't be marked ready or signed yet, judged on what is saved."""
+        if self.status not in (self.Status.PRICED, self.Status.SIGNED):
+            return None
+        if not self.removed_lines:
+            return (
+                "A change order has to return or remove at least one item from the original scope. "
+                "Added equipment on its own belongs on a new quote."
+            )
+        if problem := self.line_problem():
+            return problem
+        if not self.exceptions_ok:
+            return "Needs manager approval: an added item is priced below its minimum."
+        return None
+
+    def summary(self):
+        parts = [f"returned {plain(l.quantity)} x {l.description}" for l in self.removed_lines]
+        parts += [f"added {plain(l.quantity)} x {l.description}" for l in self.added_lines]
+        return f"Change order {self.number}: " + "; ".join(parts) + "."
+
+    def apply_to_work_order(self):
+        """Record a signed change order on the Install work order so Ops sees the current scope."""
+        if self.status != self.Status.SIGNED or self.applied_at:
+            return
+        work_order = self.quote.work_orders.filter(wo_type="install").first()
+        if work_order:
+            work_order.description = f"{work_order.description}\n\n{self.summary()}".strip()
+            work_order.save(update_fields=["description"])
+        self.applied_at = timezone.now()
+        self.save(update_fields=["applied_at"])
+
+    def clean(self):
+        if not self.pk and self.quote_id and not self.quote.install_begun:
+            raise ValidationError(
+                "Install hasn't begun, so this isn't a change order. Revise the quote instead; "
+                "new equipment goes on a new quote."
+            )
+        if self.status == self.Status.SIGNED and not self.signed_by.strip():
+            raise ValidationError("Enter who signed the change order.")
+
+    def save(self, *args, **kwargs):
+        if not self.co_number:
+            self.co_number = next_in_sequence(ChangeOrder.objects.filter(quote=self.quote), "co_number")
+        if self.status == self.Status.SIGNED and not self.signed_on:
+            self.signed_on = timezone.localdate()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.number
+
+
+class ChangeOrderLine(models.Model):
+    class Direction(models.TextChoices):
+        REMOVE = "remove", "Returned / removed"
+        ADD = "add", "Added"
+
+    change_order = models.ForeignKey(ChangeOrder, on_delete=models.CASCADE, related_name="lines")
+    direction = models.CharField(max_length=10, choices=Direction.choices, default=Direction.REMOVE)
+    quote_line = models.ForeignKey(
+        QuoteLine, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+        help_text="For returned items: the original line.",
+    )
+    item = models.ForeignKey("inventory.CatalogItem", on_delete=models.PROTECT, null=True, blank=True, help_text="For added items.")
+    description = models.CharField(max_length=200, blank=True)
+    quantity = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal("1"), validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    unit_price = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Blank uses the original price for returns and the list price for additions.",
+    )
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, editable=False)
+    unit_min_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, editable=False)
+    restocking_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Returns only. Blank means to be decided by Ops.",
+    )
+
+    class Meta:
+        ordering = ["id"]
+
+    @property
+    def amount(self):
+        value = money((self.unit_price or 0) * self.quantity)
+        return -value if self.direction == self.Direction.REMOVE else value
+
+    @property
+    def cost_effect(self):
+        value = money((self.unit_cost or 0) * self.quantity)
+        return -value if self.direction == self.Direction.REMOVE else value
+
+    @property
+    def below_floor(self):
+        return (
+            self.direction == self.Direction.ADD and self.unit_min_price is not None
+            and self.unit_price is not None and self.unit_price < self.unit_min_price
+        )
+
+    def clean(self):
+        if self.direction == self.Direction.REMOVE and not self.quote_line_id:
+            raise ValidationError("Pick the original line being returned.")
+        if self.direction == self.Direction.ADD and not self.item_id:
+            raise ValidationError("Pick the catalog item being added.")
+
+    def save(self, *args, **kwargs):
+        if self.direction == self.Direction.REMOVE and self.quote_line_id:
+            source = self.quote_line
+            self.description = self.description or source.description
+            if self.unit_cost is None:
+                self.unit_cost = source.unit_cost
+            if self.unit_price is None:
+                self.unit_price = source.unit_price
+        elif self.direction == self.Direction.ADD and self.item_id:
+            self.description = self.description or self.item.name
+            if self.unit_cost is None:
+                self.unit_cost = self.item.unit_cost
+            if self.unit_min_price is None:
+                self.unit_min_price = self.item.min_price
+            if self.unit_price is None:
+                self.unit_price = self.item.list_price
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.get_direction_display()}: {plain(self.quantity)} x {self.description}"

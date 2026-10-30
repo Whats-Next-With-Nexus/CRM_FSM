@@ -28,6 +28,9 @@ DEBUG = True
 
 COMPANY_NAME = os.environ.get("COMPANY_NAME", "Your Company Name")
 QUOTE_VALID_DAYS = 30
+RESTOCKING_NOTICE = (
+    "A restocking fee of up to 15% may apply to returned equipment. Any fee is confirmed by our operations team."
+)
 QUOTE_TERMS = (
     "Pricing is valid until the date shown. A deposit is due on acceptance and work is scheduled once it is received. "
     "Changes to the scope after acceptance require a signed change order."

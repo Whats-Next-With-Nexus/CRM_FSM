@@ -8,26 +8,35 @@ REVIEW = ("change", "view")
 
 SALES = {
     ("crm", "customer"): EDIT, ("crm", "site"): EDIT, ("crm", "quote"): EDIT, ("crm", "quoteline"): EDIT,
+    ("crm", "quoterevision"): VIEW, ("crm", "changeorder"): REVIEW, ("crm", "changeorderline"): EDIT,
     ("crm", "system"): VIEW, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
     ("crm", "repairplanenrollment"): VIEW, ("inventory", "catalogitem"): VIEW, ("crm", "notification"): REVIEW,
     ("fsm", "workorder"): VIEW, ("fsm", "visit"): VIEW,
 }
 MANAGER = {
     ("crm", "customer"): VIEW, ("crm", "site"): VIEW, ("crm", "quote"): REVIEW, ("crm", "quoteline"): VIEW,
+    ("crm", "quoterevision"): VIEW, ("crm", "changeorder"): EDIT, ("crm", "changeorderline"): EDIT,
     ("crm", "system"): EDIT, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
     ("crm", "repairplanenrollment"): VIEW, ("inventory", "catalogitem"): EDIT, ("crm", "notification"): REVIEW,
-    ("fsm", "workorder"): EDIT, ("fsm", "visit"): FULL,
+    ("fsm", "workorder"): EDIT, ("fsm", "visit"): FULL, ("fsm", "visitassignment"): FULL,
+    ("fsm", "skill"): EDIT, ("fsm", "techprofile"): EDIT,
 }
-MANAGER_EXTRAS = [("crm", "quote", "view_costs"), ("crm", "quote", "approve_exceptions"), ("crm", "quote", "decide_intake")]
+MANAGER_EXTRAS = [
+    ("crm", "quote", "view_costs"), ("crm", "quote", "approve_exceptions"), ("crm", "quote", "decide_intake"),
+    ("crm", "quote", "revise_quote"), ("crm", "changeorder", "set_restocking"),
+]
 
 # role -> (model permissions, extra custom permissions). Anything beyond a role is granted per user in the admin.
 ROLES = {
-    "Sales": (SALES, []),
-    "Sales Manager": (SALES, [("crm", "quote", "view_costs"), ("crm", "quote", "approve_exceptions")]),
+    "Sales": (SALES, [("crm", "quote", "revise_quote")]),
+    "Sales Manager": (SALES, [
+        ("crm", "quote", "view_costs"), ("crm", "quote", "approve_exceptions"), ("crm", "quote", "revise_quote"),
+    ]),
     "Technician": ({
         ("crm", "customer"): VIEW, ("crm", "site"): VIEW, ("crm", "system"): VIEW,
         ("crm", "repairplanenrollment"): VIEW,
         ("fsm", "workorder"): VIEW, ("fsm", "visit"): VIEW,
+        ("fsm", "visitassignment"): REVIEW, ("fsm", "skill"): VIEW, ("fsm", "techprofile"): VIEW,
     }, []),
     "Install Manager": (MANAGER, MANAGER_EXTRAS),
     "Operations Manager": (

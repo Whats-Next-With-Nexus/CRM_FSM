@@ -1,18 +1,22 @@
 from datetime import timedelta
+from decimal import Decimal
+from types import SimpleNamespace
 
 from django.conf import settings
 from django.contrib import admin, messages
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
-from django.utils.html import format_html
+from django.utils.dateparse import parse_date, parse_datetime
+from django.utils.html import format_html, format_html_join
+from django.utils.safestring import mark_safe
 
 from .forms import NewLeadForm
 from .models import (
-    Contractor, Customer, Notification, Quote, QuoteLine, RepairPlan, RepairPlanEnrollment, Site, System, SystemType,
-    notify,
+    ChangeOrder, ChangeOrderLine, Contractor, Customer, Notification, Quote, QuoteLine, QuoteRevision, RepairPlan,
+    RepairPlanEnrollment, Site, System, SystemType, notify,
 )
 
 
@@ -192,6 +196,63 @@ class QuoteLineInline(admin.TabularInline):
         return super().has_delete_permission(request, obj) and not self._locked(request, obj)
 
 
+def signed_dollars(value):
+    return f"-{dollars(abs(value))}" if value < 0 else dollars(value)
+
+
+def quote_document_data(quote, revision=None):
+    """What the printable quote shows, from the live quote or from a frozen earlier revision."""
+    if revision is None:
+        lines = [
+            SimpleNamespace(description=l.description, quantity=l.quantity, unit_price=l.unit_price, line_price=l.line_price)
+            for l in quote.lines.all()
+        ]
+        doc = SimpleNamespace(
+            number=quote.number, revision=quote.revision, sent_on=quote.sent_on, valid_until=quote.valid_until,
+            salesperson=quote.salesperson, total_price=quote.total_price, deposit_percent=quote.deposit_percent,
+            deposit_due=quote.deposit_due, system_types=[SimpleNamespace(name=t.name) for t in quote.system_types.all()],
+            superseded=False,
+        )
+        return {"quote": doc, "lines": lines, "watermark": "DRAFT" if quote.stage == Quote.Stage.NEW_LEAD else ""}
+    snap = revision.snapshot
+    lines = [
+        SimpleNamespace(
+            description=l["description"], quantity=Decimal(l["quantity"]), unit_price=Decimal(l["unit_price"]),
+            line_price=Decimal(l["amount"]),
+        )
+        for l in snap["lines"]
+    ]
+    doc = SimpleNamespace(
+        number=quote.number, revision=snap["revision"], sent_on=parse_datetime(snap["sent_on"]) if snap["sent_on"] else None,
+        valid_until=parse_date(snap["valid_until"]) if snap["valid_until"] else None, salesperson=quote.salesperson,
+        total_price=Decimal(snap["total"]), deposit_percent=Decimal(snap["deposit_percent"]),
+        deposit_due=Decimal(snap["deposit_due"]), system_types=[SimpleNamespace(name=n) for n in snap["system_types"]],
+        superseded=True,
+    )
+    return {"quote": doc, "lines": lines, "watermark": "SUPERSEDED"}
+
+
+class QuoteRevisionInline(admin.TabularInline):
+    model = QuoteRevision
+    extra = 0
+    fields = ("revision", "created", "created_by", "reason", "copy_link")
+    readonly_fields = fields
+
+    @admin.display(description="Customer copy")
+    def copy_link(self, obj):
+        url = f"{reverse('admin:crm_quote_document', args=[obj.quote_id])}?rev={obj.revision}"
+        return format_html('<a href="{}" target="_blank">Open revision {}</a>', url, obj.revision)
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 class FollowUpFilter(admin.SimpleListFilter):
     title = "follow-up"
     parameter_name = "follow_up"
@@ -220,13 +281,14 @@ class QuoteAdmin(admin.ModelAdmin):
     list_filter = ("stage", "ops_status", FollowUpFilter, "salesperson", "lost_reason")
     search_fields = ("site__address", "site__customer__name")
     filter_horizontal = ("system_types",)
-    inlines = [QuoteLineInline]
+    inlines = [QuoteLineInline, QuoteRevisionInline]
     cost_columns = ("margin_pct",)
 
     def get_urls(self):
         custom = [
             path("new-lead/", self.admin_site.admin_view(self.new_lead_view), name="crm_quote_new_lead"),
             path("<int:pk>/document/", self.admin_site.admin_view(self.document_view), name="crm_quote_document"),
+            path("<int:pk>/revise/", self.admin_site.admin_view(self.revise_view), name="crm_quote_revise"),
         ]
         return custom + super().get_urls()
 
@@ -249,17 +311,45 @@ class QuoteAdmin(admin.ModelAdmin):
         quote = get_object_or_404(Quote.objects.select_related("site__customer"), pk=pk)
         if not self.has_view_permission(request, quote):
             raise PermissionDenied
+        revision = None
+        if request.GET.get("rev"):
+            revision = get_object_or_404(QuoteRevision, quote=quote, revision=request.GET["rev"])
         context = {
-            "quote": quote,
+            **quote_document_data(quote, revision),
             "customer": quote.customer,
             "site": quote.site,
-            "lines": quote.lines.select_related("item"),
-            "system_types": quote.system_types.all(),
             "company_name": settings.COMPANY_NAME,
             "terms": settings.QUOTE_TERMS,
-            "is_draft": quote.stage == Quote.Stage.NEW_LEAD,
         }
         return TemplateResponse(request, "crm/quote_document.html", context)
+
+    def revise_view(self, request, pk):
+        quote = get_object_or_404(Quote.objects.select_related("site__customer"), pk=pk)
+        if not request.user.has_perm("crm.revise_quote"):
+            raise PermissionDenied
+        back = redirect("admin:crm_quote_change", quote.pk)
+        if request.method == "POST":
+            was_with_ops = quote.ops_status in (Quote.OpsStatus.PENDING, Quote.OpsStatus.ACCEPTED)
+            try:
+                quote.revise(request.user, request.POST.get("reason", "").strip())
+            except ValidationError as error:
+                self.message_user(request, error.messages[0], messages.ERROR)
+                return back
+            if was_with_ops:
+                notify(OPS_GROUPS, f"{quote.number} was revised to revision {quote.revision} before install began. It needs to be accepted again.", quote)
+            self.message_user(request, f"{quote.number} is now revision {quote.revision}. The customer needs to sign again.", messages.SUCCESS)
+            return back
+        if quote.install_begun:
+            self.message_user(
+                request, "Install has begun. Changes to the original scope need a change order, and new equipment needs a new quote.",
+                messages.ERROR,
+            )
+            return back
+        context = {
+            **self.admin_site.each_context(request), "title": f"Revise {quote.number}", "quote": quote,
+            "next_revision": quote.revision + 1, "opts": self.model._meta,
+        }
+        return TemplateResponse(request, "admin/crm/quote/revise.html", context)
 
     def get_list_display(self, request):
         columns = super().get_list_display(request)
@@ -269,13 +359,14 @@ class QuoteAdmin(admin.ModelAdmin):
         pricing = ["price_total"]
         if sees_costs(request):
             pricing += ["cost_total", "margin_total", "margin_pct"]
-        pricing += ["deposit_percent", "deposit_amount_due", "exceptions_note", "exceptions_approved"]
+        pricing += ["deposit_percent", "deposit_amount_due", "contract_value", "exceptions_note", "exceptions_approved"]
         return (
             (None, {"fields": (
                 "number", "site", "stage", "system_types", "salesperson", "follow_up_on", "notes", "sent_on", "valid_until",
                 "document_link",
             )}),
             ("Pricing (save to refresh totals)", {"fields": pricing}),
+            ("Revisions and change orders", {"fields": ("revision_note", "revise_link", "change_order_links")}),
             ("Agreement, deposit and Sent to Ops checklist", {"fields": (
                 "agreement_signed", "signed_by", "agreement_signed_on", "deposit_received", "deposit_received_amount",
                 "deposit_received_on", "deliverables_verified", "permits_required",
@@ -293,7 +384,7 @@ class QuoteAdmin(admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         fields = [
             "number", "sent_on", "document_link", "price_total", "cost_total", "margin_total", "margin_pct",
-            "deposit_amount_due", "exceptions_note",
+            "deposit_amount_due", "exceptions_note", "contract_value", "revision_note", "revise_link", "change_order_links",
         ]
         user = request.user
         if not user.has_perm("crm.approve_exceptions"):
@@ -303,6 +394,41 @@ class QuoteAdmin(admin.ModelAdmin):
         if sent_to_ops(obj) and not user.has_perm("crm.override_sent_quote"):
             fields += [f for f in EDITABLE_QUOTE_FIELDS if f not in fields]
         return fields
+
+    @admin.display(description="Revision")
+    def revision_note(self, obj):
+        return f"Revision {obj.revision}" if obj.pk else "-"
+
+    @admin.display(description="Contract value")
+    def contract_value(self, obj):
+        if not obj.pk:
+            return "-"
+        signed = obj.signed_change_orders
+        if not signed:
+            return dollars(obj.total_price)
+        return f"{dollars(obj.current_value)} ({dollars(obj.total_price)} original plus {len(signed)} signed change order(s))"
+
+    @admin.display(description="Revise")
+    def revise_link(self, obj):
+        if not obj.pk or not obj.sent_on or obj.stage == Quote.Stage.LOST:
+            return "A quote can be revised once it has been sent."
+        if obj.install_begun:
+            return "Install has begun. Use a change order for changes to the original scope, or a new quote for new equipment."
+        return format_html('<a href="{}">Revise this quote</a>', reverse("admin:crm_quote_revise", args=[obj.pk]))
+
+    @admin.display(description="Change orders")
+    def change_order_links(self, obj):
+        if not obj.pk:
+            return "-"
+        rows = [
+            format_html('<a href="{}">{}</a> ({})', reverse("admin:crm_changeorder_change", args=[co.pk]), co.number, co.get_status_display())
+            for co in obj.change_orders.all()
+        ]
+        if obj.install_begun:
+            rows.append(format_html('<a href="{}?quote={}">Add a change order</a>', reverse("admin:crm_changeorder_add"), obj.pk))
+        elif not rows:
+            return "None. Change orders open once the first visit has started."
+        return format_html_join(mark_safe("<br>"), "{}", ((row,) for row in rows))
 
     @admin.display(description="Total price")
     def price_total(self, obj):
@@ -373,6 +499,171 @@ class QuoteAdmin(admin.ModelAdmin):
                 notify(SALES_GROUPS, f"{quote.number} was accepted by Ops as {work_order.number}.", quote)
             elif quote.ops_status == Quote.OpsStatus.REFUSED:
                 notify(SALES_GROUPS, f"{quote.number} was returned by Ops: {quote.ops_note}", quote)
+
+
+def saved_co_status(co):
+    if not (co and co.pk):
+        return None
+    return ChangeOrder.objects.filter(pk=co.pk).values_list("status", flat=True).first()
+
+
+def co_locked(co):
+    return saved_co_status(co) in (ChangeOrder.Status.SIGNED, ChangeOrder.Status.DECLINED)
+
+
+class ChangeOrderLineInline(admin.TabularInline):
+    model = ChangeOrderLine
+    extra = 1
+    fields = ("direction", "quote_line", "item", "description", "quantity", "unit_price", "restocking_percent", "amount_display")
+    readonly_fields = ("amount_display",)
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = list(super().get_readonly_fields(request, obj))
+        if not request.user.has_perm("crm.set_restocking"):
+            fields.append("restocking_percent")
+        return fields
+
+    def _quote_id(self, request):
+        match = request.resolver_match
+        object_id = match.kwargs.get("object_id") if match else None
+        if object_id:
+            return ChangeOrder.objects.filter(pk=object_id).values_list("quote_id", flat=True).first()
+        return request.GET.get("quote") or request.POST.get("quote")
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "quote_line":
+            kwargs["queryset"] = QuoteLine.objects.filter(quote_id=self._quote_id(request) or 0)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    @admin.display(description="Amount")
+    def amount_display(self, obj):
+        return signed_dollars(obj.amount) if obj.pk else "-"
+
+    def has_add_permission(self, request, obj=None):
+        return super().has_add_permission(request, obj) and not co_locked(obj)
+
+    def has_change_permission(self, request, obj=None):
+        return super().has_change_permission(request, obj) and not co_locked(obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return super().has_delete_permission(request, obj) and not co_locked(obj)
+
+
+@admin.register(ChangeOrder)
+class ChangeOrderAdmin(admin.ModelAdmin):
+    list_display = ("number", "quote", "status", "net_display", "billing", "created")
+    list_filter = ("status", "billing")
+    search_fields = ("quote__site__customer__name", "quote__site__address", "reason")
+    inlines = [ChangeOrderLineInline]
+    editable_fields = ("status", "reason", "billing", "exceptions_approved", "signed_by", "signed_on")
+
+    def get_urls(self):
+        custom = [path("<int:pk>/document/", self.admin_site.admin_view(self.document_view), name="crm_changeorder_document")]
+        return custom + super().get_urls()
+
+    def document_view(self, request, pk):
+        co = get_object_or_404(ChangeOrder.objects.select_related("quote__site__customer"), pk=pk)
+        if not self.has_view_permission(request, co):
+            raise PermissionDenied
+        removed = [
+            SimpleNamespace(
+                description=l.description, quantity=l.quantity, unit_price=l.unit_price, credit=abs(l.amount),
+                restocking_percent=l.restocking_percent,
+            )
+            for l in co.removed_lines
+        ]
+        added = [SimpleNamespace(description=l.description, quantity=l.quantity, unit_price=l.unit_price, amount=l.amount) for l in co.added_lines]
+        if co.billing == ChangeOrder.Billing.ABSORB:
+            billing_note = "The difference is absorbed. The contract price does not change."
+        elif co.net_price:
+            billing_note = "The difference is added to the final invoice."
+        else:
+            billing_note = "No change to the contract price."
+        context = {
+            "co": co, "quote": co.quote, "customer": co.quote.customer, "site": co.quote.site, "removed": removed,
+            "added": added, "net_abs": abs(co.net_price), "billing_note": billing_note, "date": co.signed_on or co.created,
+            "company_name": settings.COMPANY_NAME, "restocking_notice": settings.RESTOCKING_NOTICE,
+            "watermark": {"requested": "DRAFT", "declined": "DECLINED"}.get(co.status, ""),
+        }
+        return TemplateResponse(request, "crm/changeorder_document.html", context)
+
+    def get_changeform_initial_data(self, request):
+        return {"quote": request.GET["quote"]} if request.GET.get("quote") else {}
+
+    def get_fieldsets(self, request, obj=None):
+        pricing = ["net_display"]
+        if sees_costs(request):
+            pricing += ["cost_display", "margin_display"]
+        pricing += ["exceptions_note", "exceptions_approved"]
+        return (
+            (None, {"fields": ("number", "quote", "status", "reason", "billing", "document_link")}),
+            ("Pricing (save to refresh totals)", {"fields": pricing}),
+            ("Customer signature", {"fields": ("signed_by", "signed_on")}),
+        )
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = ["number", "net_display", "cost_display", "margin_display", "exceptions_note", "document_link"]
+        if obj and obj.pk:
+            fields.append("quote")
+        if not request.user.has_perm("crm.approve_exceptions"):
+            fields.append("exceptions_approved")
+        if co_locked(obj):
+            fields += [f for f in self.editable_fields if f not in fields]
+        return fields
+
+    @admin.display(description="Net change")
+    def net_display(self, obj):
+        return signed_dollars(obj.net_price) if obj.pk else "-"
+
+    @admin.display(description="Cost change")
+    def cost_display(self, obj):
+        return signed_dollars(obj.net_cost) if obj.pk else "-"
+
+    @admin.display(description="Margin change")
+    def margin_display(self, obj):
+        return signed_dollars(obj.margin_change) if obj.pk else "-"
+
+    @admin.display(description="Exceptions")
+    def exceptions_note(self, obj):
+        if not obj.pk or not obj.below_floor_lines:
+            return "None."
+        return "Approved." if obj.exceptions_ok else "Needs manager approval: an added item is priced below its minimum."
+
+    @admin.display(description="Customer copy")
+    def document_link(self, obj):
+        if not obj.pk:
+            return "Save the change order first."
+        return format_html('<a href="{}" target="_blank">Open the customer copy</a>', reverse("admin:crm_changeorder_document", args=[obj.pk]))
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.requested_by = request.user
+        super().save_model(request, obj, form, change)
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        co, user = form.instance, request.user
+        changed = set(form.changed_data)
+
+        if user.has_perm("crm.approve_exceptions") and co.exceptions_approved:
+            co.exceptions_signature = co.current_signature()
+            co.exceptions_approved_by = user
+            co.save(update_fields=["exceptions_signature", "exceptions_approved_by"])
+
+        if problem := co.stage_problem():
+            ChangeOrder.objects.filter(pk=co.pk).update(status=ChangeOrder.Status.REQUESTED)
+            co.refresh_from_db()
+            self.message_user(request, f"{problem} The change order was moved back to Requested.", messages.ERROR)
+            return
+
+        if not change:
+            notify(SALES_GROUPS, f"{co.number} was requested. Price anything added, then take it to the customer to sign.", co.quote)
+        if "status" in changed:
+            if co.status == ChangeOrder.Status.SIGNED:
+                co.apply_to_work_order()
+                notify(OPS_GROUPS, f"{co.number} was signed by the customer. The change is noted on the work order.", co.quote)
+            elif co.status == ChangeOrder.Status.DECLINED:
+                notify(OPS_GROUPS, f"{co.number} was declined by the customer. The original scope stands.", co.quote)
 
 
 @admin.register(Notification)

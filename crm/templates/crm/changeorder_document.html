@@ -1,0 +1,76 @@
+{% extends "crm/document_base.html" %}
+{% block doc_title %}Change order {{ co.number }}{% endblock %}
+{% block body %}
+    {% if watermark %}<div class="watermark">{{ watermark }}</div>{% endif %}
+    <header>
+      <h1>{{ company_name }}</h1>
+      <div class="doc-title">
+        <strong>Change order {{ co.number }}</strong>
+        <span class="muted">{{ date|date:"F j, Y" }}</span><br>
+        <span class="muted">Against quote {{ quote.number }}</span>
+      </div>
+    </header>
+
+    <div class="meta">
+      <div>
+        <h2>Customer</h2>
+        <strong>{{ customer.name }}</strong><br>
+        {% if customer.contact_name %}{{ customer.contact_name }}{% endif %}
+      </div>
+      <div>
+        <h2>Work location</h2>
+        {% if site.name %}<strong>{{ site.name }}</strong><br>{% endif %}
+        {{ site.address }}
+      </div>
+    </div>
+
+    <p><strong>Reason for change:</strong> {{ co.reason }}</p>
+
+    {% if removed %}
+    <h3 class="label">Returned or removed</h3>
+    <table>
+      <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Credit each</th><th class="num">Credit</th><th class="num">Restocking</th></tr></thead>
+      <tbody>
+        {% for line in removed %}
+        <tr>
+          <td>{{ line.description }}</td>
+          <td class="num">{{ line.quantity|floatformat:"-2" }}</td>
+          <td class="num">${{ line.unit_price|floatformat:"2g" }}</td>
+          <td class="num">-${{ line.credit|floatformat:"2g" }}</td>
+          <td class="num">{% if line.restocking_percent is not None %}{{ line.restocking_percent|floatformat:"-2" }}%{% else %}to be confirmed{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if added %}
+    <h3 class="label">Added</h3>
+    <table>
+      <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
+      <tbody>
+        {% for line in added %}
+        <tr>
+          <td>{{ line.description }}</td>
+          <td class="num">{{ line.quantity|floatformat:"-2" }}</td>
+          <td class="num">${{ line.unit_price|floatformat:"2g" }}</td>
+          <td class="num">${{ line.amount|floatformat:"2g" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    <table class="totals">
+      <tr class="grand"><td>Net change</td><td class="num">{% if co.net_price < 0 %}-{% endif %}${{ net_abs|floatformat:"2g" }}</td></tr>
+      <tr><td colspan="2" class="muted">{{ billing_note }}</td></tr>
+    </table>
+
+    {% if removed %}<p class="terms">{{ restocking_notice }}</p>{% endif %}
+    <p class="terms">No additional deposit is required for this change order. By signing, the customer agrees to the changes above.</p>
+
+    <div class="sign">
+      <div>Accepted by (signature and printed name){% if co.signed_by %}: {{ co.signed_by }}{% endif %}</div>
+      <div>Date{% if co.signed_on %}: {{ co.signed_on|date:"F j, Y" }}{% endif %}</div>
+    </div>
+{% endblock %}

@@ -5,6 +5,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.core.management.base import BaseCommand, CommandError
 
+from fsm.models import Skill, TechProfile
+
 DEFAULT_PASSWORD = "gr8password"
 ACCOUNTS = [
     ("dev", None), ("sales", "Sales"), ("salesmgr", "Sales Manager"),
@@ -30,4 +32,6 @@ class Command(BaseCommand):
             user.is_superuser = role is None
             user.save()
             user.groups.set([Group.objects.get(name=role)] if role else [])
+            if role == "Technician":
+                TechProfile.objects.get_or_create(user=user)[0].skills.set(Skill.objects.all())
         self.stdout.write(f"Logins ready: {', '.join(name for name, _ in ACCOUNTS)}")

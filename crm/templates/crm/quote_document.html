@@ -1,48 +1,12 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Quote {{ quote.number }}</title>
-  <style>
-    :root { --ink: #1c2530; --muted: #5b6673; --line: #d5dbe2; --accent: #1f4e79; }
-    * { box-sizing: border-box; }
-    body { font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: var(--ink); margin: 0; background: #eef1f4; }
-    .page { max-width: 820px; margin: 24px auto; background: #fff; padding: 48px 56px; position: relative; }
-    header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid var(--accent); padding-bottom: 16px; }
-    h1 { margin: 0; font-size: 22px; color: var(--accent); }
-    .doc-title { text-align: right; }
-    .doc-title strong { font-size: 20px; display: block; }
-    .muted { color: var(--muted); }
-    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 24px 0; }
-    .meta h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 4px; }
-    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
-    th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); border-bottom: 2px solid var(--line); padding: 8px 6px; }
-    td { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    .num { text-align: right; white-space: nowrap; }
-    .totals { margin-left: auto; width: 320px; }
-    .totals td { border: 0; padding: 4px 6px; }
-    .totals .grand td { font-weight: 700; font-size: 17px; border-top: 2px solid var(--ink); padding-top: 8px; }
-    .terms { margin-top: 28px; font-size: 13px; color: var(--muted); }
-    .sign { display: grid; grid-template-columns: 2fr 1fr; gap: 32px; margin-top: 48px; }
-    .sign div { border-top: 1px solid var(--ink); padding-top: 4px; font-size: 12px; color: var(--muted); }
-    .draft { position: absolute; top: 40%; left: 12%; font-size: 110px; font-weight: 800; color: rgba(180, 30, 30, .12); transform: rotate(-24deg); pointer-events: none; }
-    .toolbar { max-width: 820px; margin: 16px auto 0; text-align: right; }
-    button { font: inherit; padding: 8px 16px; border: 0; background: var(--accent); color: #fff; border-radius: 4px; cursor: pointer; }
-    @media print {
-      body { background: #fff; }
-      .page { margin: 0; padding: 0; max-width: none; }
-      .toolbar { display: none; }
-    }
-  </style>
-</head>
-<body>
-  <div class="toolbar"><button onclick="window.print()">Print or save as PDF</button></div>
-  <div class="page">
-    {% if is_draft %}<div class="draft">DRAFT</div>{% endif %}
+{% extends "crm/document_base.html" %}
+{% block doc_title %}Quote {{ quote.number }}{% endblock %}
+{% block body %}
+    {% if watermark %}<div class="watermark">{{ watermark }}</div>{% endif %}
+    {% if quote.superseded %}<p class="banner">This is an earlier version of the quote. It was replaced by a later revision.</p>{% endif %}
     <header>
       <h1>{{ company_name }}</h1>
       <div class="doc-title">
-        <strong>Quote {{ quote.number }}</strong>
+        <strong>Quote {{ quote.number }}{% if quote.revision > 1 %} <span class="muted">rev {{ quote.revision }}</span>{% endif %}</strong>
         <span class="muted">{% if quote.sent_on %}{{ quote.sent_on|date:"F j, Y" }}{% else %}Not yet sent{% endif %}</span>
         {% if quote.valid_until %}<br><span class="muted">Valid until {{ quote.valid_until|date:"F j, Y" }}</span>{% endif %}
       </div>
@@ -65,8 +29,8 @@
       </div>
     </div>
 
-    {% if system_types %}
-    <p><strong>Scope:</strong> {% for t in system_types %}{{ t.name }}{% if not forloop.last %}, {% endif %}{% endfor %}</p>
+    {% if quote.system_types %}
+    <p><strong>Scope:</strong> {% for t in quote.system_types %}{{ t.name }}{% if not forloop.last %}, {% endif %}{% endfor %}</p>
     {% endif %}
 
     <table>
@@ -96,6 +60,4 @@
       <div>Accepted by (signature and printed name)</div>
       <div>Date</div>
     </div>
-  </div>
-</body>
-</html>
+{% endblock %}

@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
@@ -7,8 +8,10 @@ from django.utils import timezone
 from crm.models import (
     Contractor, Customer, Quote, QuoteLine, RepairPlan, RepairPlanEnrollment, Site, System, SystemType,
 )
-from fsm.models import WorkOrder
+from fsm.models import Skill, TechProfile, Visit, VisitAssignment, WorkOrder
 from inventory.models import CatalogItem
+
+User = get_user_model()
 
 Kind = CatalogItem.Kind
 CATALOG = [
@@ -96,5 +99,29 @@ class Command(BaseCommand):
         WorkOrder.objects.create(
             wo_type=WorkOrder.Type.SERVICE, site=Site.objects.get(customer=brightpath, site_number=1),
             description="Front door camera offline.",
+        )
+
+        # An accepted install with a technician assigned. Starting the job lets you try a revision cutoff and a change order.
+        church = Customer.objects.create(name="Cedar Ridge Church", status=Customer.Status.CUSTOMER, contact_name="Jordan Reyes")
+        hall = Site.objects.create(customer=church, name="Fellowship hall", address="720 Cedar Ridge Rd", city="Greenwood", state="IN")
+        install_quote = Quote.objects.create(site=hall, stage=Quote.Stage.QUOTE_SENT, salesperson="Dakota")
+        install_quote.system_types.add(types["CCTV"])
+        for sku, qty in [("CAM-DOME-4MP", 3), ("SW-POE-8", 1), ("LAB-TECH", 16)]:
+            QuoteLine.objects.create(quote=install_quote, item=items[sku], quantity=qty, system_type=types["CCTV"])
+        install_quote.stage = Quote.Stage.SENT_TO_OPS
+        install_quote.agreement_signed, install_quote.signed_by = True, "Jordan Reyes"
+        install_quote.deposit_received, install_quote.deposit_received_amount = True, install_quote.deposit_due
+        install_quote.deliverables_verified = True
+        install_quote.ops_status = Quote.OpsStatus.ACCEPTED
+        install_quote.save()
+        install_wo = install_quote.ensure_install_work_order()
+        install_wo.status = WorkOrder.Status.SCHEDULED
+        install_wo.save(update_fields=["status"])
+
+        tech, _ = User.objects.get_or_create(username="tech", defaults={"email": "tech@example.com", "is_staff": True})
+        TechProfile.objects.get_or_create(user=tech)[0].skills.set(Skill.objects.all())
+        VisitAssignment.objects.create(
+            visit=Visit.objects.create(work_order=install_wo, scheduled_for=timezone.localdate()),
+            tech=tech, skill=Skill.objects.get(name="Cabling and pre-wire"),
         )
         self.stdout.write(self.style.SUCCESS("Demo data loaded."))
