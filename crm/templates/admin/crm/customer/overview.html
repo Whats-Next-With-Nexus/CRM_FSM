@@ -1,0 +1,172 @@
+{% extends "admin/base_site.html" %}
+{% block extrastyle %}{{ block.super }}
+<style>
+  .ov { display: grid; gap: 20px; }
+  .ov h1 { margin: 0; }
+  .ov .sub { color: var(--body-quiet-color); margin: 2px 0 0; }
+  .ov .head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: flex-start; }
+  .ov .actions a { display: inline-block; margin-left: 6px; padding: 6px 12px; border-radius: 4px; background: var(--darkened-bg); border: 1px solid var(--border-color); text-decoration: none; }
+  .ov .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; border: 1px solid var(--border-color); background: var(--darkened-bg); color: var(--body-fg); vertical-align: middle; }
+  .ov .badge.warn { background: #fdecea; color: #8a1c13; border-color: #f0b8b3; }
+  .ov .badge.ok { background: #e6f4ea; color: #1e6b34; border-color: #b5dcc0; }
+  .ov .badge.info { background: #e8f0fb; color: #1f4e79; border-color: #b9cdea; }
+  .ov .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .ov .stat { border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 14px; background: var(--darkened-bg); }
+  .ov .stat b { display: block; font-size: 22px; line-height: 1.2; }
+  .ov .stat span { color: var(--body-quiet-color); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .ov .panel { border: 1px solid var(--border-color); border-radius: 6px; padding: 14px 16px; }
+  .ov .panel h2 { margin: 0 0 8px; font-size: 16px; background: none; color: var(--body-fg); padding: 0; text-transform: none; }
+  .ov .panel h3 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--body-quiet-color); }
+  .ov .attention { border-left: 4px solid #d9822b; }
+  .ov .attention ul { margin: 0; padding-left: 18px; }
+  .ov table { width: 100%; }
+  .ov td.num, .ov th.num { text-align: right; white-space: nowrap; }
+  .ov .muted { color: var(--body-quiet-color); }
+  .ov .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .ov .site-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+  .ov .note { white-space: pre-line; }
+</style>
+{% endblock %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a> &rsaquo;
+  <a href="{% url 'admin:crm_customer_changelist' %}">Customers</a> &rsaquo; {{ ov.customer.name }}
+</div>
+{% endblock %}
+{% block content_title %}{% endblock %}
+{% block content %}
+<div class="ov">
+  <div class="head">
+    <div>
+      <h1>{{ ov.customer.name }}</h1>
+      <p class="sub">
+        {{ ov.customer.number }} &middot; <span class="badge">{{ ov.customer.get_status_display }}</span>
+        {% if ov.customer.lead_source %}&middot; Source: {{ ov.customer.get_lead_source_display }}{% endif %}
+        {% if ov.contract %}&middot; Contracted through: {{ ov.contract }}{% endif %}
+      </p>
+      <p class="sub">
+        {% if ov.customer.contact_name %}{{ ov.customer.contact_name }}{% endif %}
+        {% if ov.customer.phone %}&middot; {{ ov.customer.phone }}{% endif %}
+        {% if ov.customer.email %}&middot; {{ ov.customer.email }}{% endif %}
+      </p>
+    </div>
+    <div class="actions">
+      {% if ov.can_edit %}<a href="{% url 'admin:crm_customer_change' ov.customer.pk %}">Edit customer</a>{% endif %}
+      {% if ov.can_add_site %}<a href="{% url 'admin:crm_site_add' %}?customer={{ ov.customer.pk }}">Add site</a>{% endif %}
+    </div>
+  </div>
+
+  {% if ov.customer.notes %}<div class="panel"><h2>Notes</h2><div class="note">{{ ov.customer.notes }}</div></div>{% endif %}
+
+  <div class="stats">
+    <div class="stat"><b>{{ ov.summary.sites }}</b><span>Sites</span></div>
+    {% if ov.sees_quotes %}
+    <div class="stat"><b>${{ ov.summary.won_value|floatformat:"0g" }}</b><span>Won contract value</span></div>
+    <div class="stat"><b>{{ ov.summary.open_quotes }}</b><span>Open quotes (${{ ov.summary.open_value|floatformat:"0g" }})</span></div>
+    <div class="stat"><b>{{ ov.summary.next_follow_up|date:"M j"|default:"None" }}</b><span>Next follow-up</span></div>
+    {% endif %}
+    {% if ov.sees_work_orders %}<div class="stat"><b>{{ ov.summary.open_work_orders }}</b><span>Open work orders</span></div>{% endif %}
+  </div>
+
+  {% if ov.attention %}
+  <div class="panel attention">
+    <h2>Needs attention</h2>
+    <ul>
+      {% for item in ov.attention %}<li><a href="{{ item.url }}">{{ item.text }}</a></li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% for card in ov.cards %}
+  <div class="panel">
+    <div class="site-head">
+      <div>
+        <h2>{{ card.site.number }}{% if card.site.name %} &middot; {{ card.site.name }}{% endif %}</h2>
+        <div class="muted">
+          {{ card.site.address }}{% if card.site.city %}, {{ card.site.city }}{% endif %}{% if card.site.state %}, {{ card.site.state }}{% endif %} {{ card.site.zip_code }}
+        </div>
+      </div>
+      <div>
+        {% if ov.sees_plans %}
+          {% if card.plan %}<span class="badge ok">Repair plan: {{ card.plan.name }}</span>{% else %}<span class="badge">No repair plan</span>{% endif %}
+        {% endif %}
+        {% if ov.can_add_quote %}<a class="badge" href="{% url 'admin:crm_quote_add' %}?site={{ card.site.pk }}">New quote</a>{% endif %}
+      </div>
+    </div>
+    {% if card.site.access_notes %}<p class="note"><b>Access:</b> {{ card.site.access_notes }}</p>{% endif %}
+
+    {% if ov.sees_systems %}
+    <h3>Installed systems</h3>
+    {% if card.systems %}
+    <table>
+      <thead><tr><th>System</th><th>Installed</th>{% if ov.contract is not None %}<th>Billed through</th>{% endif %}<th>Equipment notes</th></tr></thead>
+      <tbody>
+        {% for row in card.systems %}
+        <tr>
+          <td><a href="{% url 'admin:crm_system_change' row.system.pk %}">{{ row.system.system_type }}</a></td>
+          <td>{{ row.system.installed_on|date:"M j, Y"|default:"-" }}</td>
+          {% if ov.contract is not None %}<td>{{ row.contract }}{% if row.system.waiver_note %} <span class="muted">({{ row.system.waiver_note }})</span>{% endif %}</td>{% endif %}
+          <td class="muted">{{ row.system.equipment_notes|truncatechars:90|default:"-" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">Nothing installed yet.</p>{% endif %}
+    {% endif %}
+
+    {% if ov.sees_quotes %}
+    <h3>Quotes</h3>
+    {% if card.quotes %}
+    <table>
+      <thead>
+        <tr><th>Quote</th><th>Stage</th><th></th><th class="num">Total</th>{% if ov.sees_costs %}<th class="num">Margin</th>{% endif %}<th>Follow-up</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for row in card.quotes %}
+        <tr>
+          <td><a href="{{ row.url }}">{{ row.quote.number }}</a></td>
+          <td>{{ row.quote.get_stage_display }}</td>
+          <td>{% for flag in row.flags %}<span class="badge {{ flag.level }}">{{ flag.text }}</span> {% endfor %}</td>
+          <td class="num">${{ row.current|floatformat:"2g" }}{% if row.current != row.total %}<br><span class="muted">was ${{ row.total|floatformat:"2g" }}</span>{% endif %}</td>
+          {% if ov.sees_costs %}<td class="num">{{ row.margin_percent }}%</td>{% endif %}
+          <td>{{ row.quote.follow_up_on|date:"M j"|default:"-" }}</td>
+          <td><a href="{{ row.document_url }}" target="_blank">Print</a></td>
+        </tr>
+        {% for co in row.change_orders %}
+        <tr class="muted">
+          <td colspan="3">&nbsp;&nbsp;&#8627; <a href="{% url 'admin:crm_changeorder_change' co.pk %}">{{ co.number }}</a> {{ co.get_status_display }}</td>
+          <td class="num">{% if co.net_price < 0 %}-{% endif %}${{ co.net_price|floatformat:"2g"|cut:"-" }}</td>
+          <td colspan="{% if ov.sees_costs %}3{% else %}2{% endif %}"></td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No quotes for this site.</p>{% endif %}
+    {% endif %}
+
+    {% if ov.sees_work_orders %}
+    <h3>Work orders</h3>
+    {% if card.work_orders %}
+    <table>
+      <thead><tr><th>Work order</th><th>Type</th><th>Status</th><th>Lead technician</th><th class="num">Hours logged</th></tr></thead>
+      <tbody>
+        {% for row in card.work_orders %}
+        <tr>
+          <td><a href="{{ row.url }}">{{ row.work_order.number }}</a></td>
+          <td>{{ row.work_order.get_wo_type_display }}{% if row.work_order.billing %} <span class="muted">({{ row.work_order.get_billing_display }})</span>{% endif %}</td>
+          <td>{{ row.work_order.get_status_display }}</td>
+          <td>{{ row.work_order.lead_tech|default:"-" }}</td>
+          <td class="num">{{ row.hours|floatformat:"-2" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No work orders for this site.</p>{% endif %}
+    {% endif %}
+  </div>
+  {% empty %}
+  <div class="panel"><p class="muted">This customer has no sites yet.</p></div>
+  {% endfor %}
+</div>
+{% endblock %}

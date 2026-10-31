@@ -1,0 +1,5 @@
+{% extends "admin/change_form.html" %}
+{% block object-tools-items %}
+  {% if original.pk %}<li><a href="{% url 'admin:crm_customer_overview' original.pk %}">Overview</a></li>{% endif %}
+  {{ block.super }}
+{% endblock %}

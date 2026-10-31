@@ -9,7 +9,10 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from crm.models import ChangeOrder, ChangeOrderLine, Customer, Notification, Quote, QuoteLine, Site, SystemType, notify
+from crm.models import (
+    ChangeOrder, ChangeOrderLine, Contractor, Customer, Notification, Quote, QuoteLine, RepairPlan,
+    RepairPlanEnrollment, Site, System, SystemType, notify,
+)
 from fsm.models import Skill, TechProfile, Visit, VisitAssignment, WorkOrder
 from inventory.models import CatalogItem
 
@@ -909,3 +912,113 @@ class RevisionAndChangeOrderTests(TestCase):
         after = self.client.get(url).content.decode()
         self.assertIn("Add a change order", after)
         self.assertNotIn("Revise this quote", after)
+
+
+class CustomerOverviewTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command("setup_roles")
+        cls.prime = Contractor.objects.create(name="Northgate")
+        cls.customer = Customer.objects.create(
+            name="Overview Co", contracted_through=cls.prime, contact_name="Pat Morgan", phone="555-0100",
+            lead_source=Customer.LeadSource.REFERRAL, notes="Prefers morning visits.",
+        )
+        cls.east = Site.objects.create(customer=cls.customer, name="East", address="1 Main St", access_notes="Gate code at front desk")
+        cls.west = Site.objects.create(customer=cls.customer, name="West", address="2 Oak Ave")
+        cctv = SystemType.objects.create(name="Overview CCTV")
+        cls.system = System.objects.create(site=cls.east, system_type=cctv, bill_direct=True, equipment_notes="8 domes, 1 NVR")
+        plan = RepairPlan.objects.create(name="Gold", monthly_rate=20)
+        RepairPlanEnrollment.objects.create(site=cls.east, plan=plan, start_date=timezone.localdate())
+
+        cls.switch = CatalogItem.objects.create(sku="SW", name="Switch", unit_cost=100, list_price=400, min_price=320)
+        cls.won = Quote.objects.create(site=cls.east, stage=Stage.APPROVED, sent_on=timezone.now())
+        QuoteLine.objects.create(quote=cls.won, item=cls.switch, quantity=2)
+        change = ChangeOrder.objects.create(quote=cls.won, reason="Add one", status="signed", signed_by="Pat")
+        ChangeOrderLine.objects.create(change_order=change, direction="add", item=cls.switch, quantity=1, unit_price=220)
+        cls.open_quote = Quote.objects.create(
+            site=cls.west, stage=Stage.QUOTE_SENT, follow_up_on=timezone.localdate() - timedelta(days=2),
+        )
+        QuoteLine.objects.create(quote=cls.open_quote, item=cls.switch, quantity=1)
+        cls.returned = Quote.objects.create(
+            site=cls.west, stage=Stage.DEPOSIT, ops_status=Quote.OpsStatus.REFUSED, ops_note="Scope unclear", sent_on=timezone.now(),
+        )
+        QuoteLine.objects.create(quote=cls.returned, item=cls.switch, quantity=1)
+        cls.waiting_co = ChangeOrder.objects.create(quote=cls.won, reason="Swap", status="priced")
+
+        tech = User.objects.create_user("leadtech", password="pw")
+        cls.install = WorkOrder.objects.create(
+            wo_type="install", site=cls.east, quote=cls.won, status=WorkOrder.Status.IN_PROGRESS, lead_tech=tech,
+        )
+        WorkOrder.objects.create(wo_type="service", site=cls.east, status=WorkOrder.Status.COMPLETE)
+
+    def as_role(self, role):
+        user = User.objects.create_user(username=role.replace(" ", "").lower(), password="pw", is_staff=True)
+        user.groups.add(Group.objects.get(name=role))
+        self.client.force_login(user)
+
+    def page(self, role):
+        self.as_role(role)
+        response = self.client.get(reverse("admin:crm_customer_overview", args=[self.customer.pk]))
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_the_page_brings_the_customer_together(self):
+        page = self.page("Sales")
+        for expected in (
+            "Overview Co", self.customer.number, "Pat Morgan", "555-0100", "Referral", "Prefers morning visits.",
+            self.east.number, self.west.number, "Gate code at front desk", "1 Main St", "2 Oak Ave",
+            self.won.number, self.open_quote.number, self.returned.number, self.install.number, "Overview CCTV",
+            "8 domes, 1 NVR", "Repair plan: Gold", "No repair plan",
+        ):
+            self.assertIn(expected, page)
+
+    def test_the_summary_adds_up_signed_change_orders_into_the_contract_value(self):
+        page = self.page("Sales")
+        self.assertIn("$1,420", page)
+        self.assertIn("Open quotes ($400)", page)
+        self.assertIn("$1,020.00", page)
+        self.assertIn("was $800.00", page)
+
+    def test_needs_attention_lists_what_a_salesperson_has_to_act_on(self):
+        page = self.page("Sales")
+        self.assertIn(f"{self.open_quote.number}: follow-up overdue", page)
+        self.assertIn(f"{self.returned.number}: returned by ops", page)
+        self.assertIn(f"{self.waiting_co.number} is waiting on the customer", page)
+
+    def test_a_technician_sees_sites_systems_and_jobs_but_not_quotes(self):
+        page = self.page("Technician")
+        self.assertIn("Gate code at front desk", page)
+        self.assertIn("8 domes, 1 NVR", page)
+        self.assertIn(self.install.number, page)
+        self.assertNotIn(self.won.number, page)
+        self.assertNotIn("Won contract value", page)
+        self.assertNotIn("Needs attention", page)
+
+    def test_contractor_details_show_only_to_operations(self):
+        self.assertNotIn("Contracted through", self.page("Sales"))
+        self.assertNotIn("Billed through", self.page("Install Manager"))
+        page = self.page("Operations Manager")
+        self.assertIn("Contracted through: Northgate", page)
+        self.assertIn("Billed through", page)
+
+    def test_margin_shows_only_to_roles_that_can_see_cost(self):
+        self.assertNotIn(">Margin<", self.page("Sales"))
+        self.assertIn(">Margin<", self.page("Sales Manager"))
+
+    def test_people_without_customer_access_are_turned_away(self):
+        stranger = User.objects.create_user("stranger", password="pw", is_staff=True)
+        self.client.force_login(stranger)
+        self.assertEqual(self.client.get(reverse("admin:crm_customer_overview", args=[self.customer.pk])).status_code, 403)
+
+    def test_a_customer_without_sites_says_so(self):
+        empty = Customer.objects.create(name="Empty Co")
+        self.as_role("Sales")
+        page = self.client.get(reverse("admin:crm_customer_overview", args=[empty.pk])).content.decode()
+        self.assertIn("no sites yet", page)
+
+    def test_the_overview_is_linked_from_the_list_and_both_detail_pages(self):
+        self.as_role("Operations Manager")
+        overview = reverse("admin:crm_customer_overview", args=[self.customer.pk])
+        self.assertIn(overview, self.client.get(reverse("admin:crm_customer_changelist")).content.decode())
+        self.assertIn(overview, self.client.get(reverse("admin:crm_customer_change", args=[self.customer.pk])).content.decode())
+        self.assertIn(overview, self.client.get(reverse("admin:crm_quote_change", args=[self.won.pk])).content.decode())

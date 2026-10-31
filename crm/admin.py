@@ -14,6 +14,7 @@ from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 
 from .forms import NewLeadForm
+from .overview import build_overview
 from .models import (
     ChangeOrder, ChangeOrderLine, Contractor, Customer, Notification, Quote, QuoteLine, QuoteRevision, RepairPlan,
     RepairPlanEnrollment, Site, System, SystemType, notify, plain,
@@ -74,13 +75,31 @@ class SiteInline(admin.TabularInline):
 
 @admin.register(Customer)
 class CustomerAdmin(ContractInfoMixin, admin.ModelAdmin):
-    list_display = ("name", "number", "status", "lead_source", "contracted_label", "contact_name", "phone")
+    list_display = ("name", "number", "overview_link", "status", "lead_source", "contracted_label", "contact_name", "phone")
     list_filter = ("status", "lead_source", "contracted_through")
     contract_columns = ("contracted_label",)
     contract_filters = ("contracted_through",)
     search_fields = ("name", "contact_name", "sites__address", "sites__name")
     readonly_fields = ("number",)
     inlines = [SiteInline]
+
+    def get_urls(self):
+        custom = [path("<int:pk>/overview/", self.admin_site.admin_view(self.overview_view), name="crm_customer_overview")]
+        return custom + super().get_urls()
+
+    def overview_view(self, request, pk):
+        customer = get_object_or_404(Customer, pk=pk)
+        if not self.has_view_permission(request, customer):
+            raise PermissionDenied
+        context = {
+            **self.admin_site.each_context(request), "title": customer.name, "opts": self.model._meta,
+            "ov": build_overview(customer, request.user),
+        }
+        return TemplateResponse(request, "admin/crm/customer/overview.html", context)
+
+    @admin.display(description="Overview")
+    def overview_link(self, obj):
+        return format_html('<a href="{}">Open</a>', reverse("admin:crm_customer_overview", args=[obj.pk]))
 
 
 class SystemInline(admin.TabularInline):
