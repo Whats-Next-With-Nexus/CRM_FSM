@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import os
+from decimal import Decimal
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -28,6 +29,8 @@ DEBUG = True
 
 COMPANY_NAME = os.environ.get("COMPANY_NAME", "Your Company Name")
 QUOTE_VALID_DAYS = 30
+LABOR_COST_RATE = Decimal("45")
+INSTALL_BONUS_PERCENT = Decimal("20")
 RESTOCKING_NOTICE = (
     "A restocking fee of up to 15% may apply to returned equipment. Any fee is confirmed by our operations team."
 )

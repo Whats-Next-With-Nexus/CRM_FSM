@@ -6,7 +6,21 @@ from django.db import models
 from django.db.models import Max
 from django.utils import timezone
 
-from crm.models import Quote, Site, System
+from crm.models import Quote, Site, System, money
+
+
+class InternalTimeCategory(models.Model):
+    """What non-billable field time was spent on, so it is visible without landing on a customer's install or service."""
+
+    name = models.CharField(max_length=60, unique=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name_plural = "internal time categories"
+
+    def __str__(self):
+        return self.name
 
 
 class WorkOrder(models.Model):
@@ -15,6 +29,7 @@ class WorkOrder(models.Model):
         SUBCONTRACT = "subcontract", "Subcontract Work"
         SERVICE = "service", "Service"
         INSPECTION = "inspection", "Inspection/Testing"
+        INTERNAL = "internal", "Internal time"
 
     class Billing(models.TextChoices):
         BILLABLE = "billable", "Billable"
@@ -30,12 +45,26 @@ class WorkOrder(models.Model):
 
     wo_type = models.CharField("type", max_length=20, choices=Type.choices)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
-    site = models.ForeignKey(Site, on_delete=models.PROTECT, related_name="work_orders")
+    site = models.ForeignKey(
+        Site, on_delete=models.PROTECT, null=True, blank=True, related_name="work_orders",
+        help_text="Required except for internal time.",
+    )
+    internal_category = models.ForeignKey(
+        InternalTimeCategory, on_delete=models.PROTECT, null=True, blank=True, related_name="work_orders",
+        help_text="Internal time only: what the time was spent on.",
+    )
+    lead_tech = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="led_work_orders",
+        limit_choices_to={"tech_profile__isnull": False}, help_text="Installs only: the lead technician, who receives any labor bonus.",
+    )
     system = models.ForeignKey(
         System, on_delete=models.PROTECT, null=True, blank=True, related_name="work_orders",
         help_text="The system being worked on. Blank for installs, where it doesn't exist yet.",
     )
-    quote = models.ForeignKey(Quote, on_delete=models.PROTECT, null=True, blank=True, related_name="work_orders")
+    quote = models.ForeignKey(
+        Quote, on_delete=models.PROTECT, null=True, blank=True, related_name="work_orders",
+        help_text="For internal time, the quote being pursued, so pre-sale effort shows on it.",
+    )
     description = models.TextField(blank=True)
     billing = models.CharField(max_length=20, choices=Billing.choices, blank=True, help_text="Service work orders only.")
     billing_override_reason = models.CharField(
@@ -45,7 +74,10 @@ class WorkOrder(models.Model):
 
     class Meta:
         ordering = ["-id"]
-        permissions = [("manage_subcontract", "Can create and edit subcontract work orders")]
+        permissions = [
+            ("manage_subcontract", "Can create and edit subcontract work orders"),
+            ("view_labor_bonus", "Can see estimated labor, labor cost and install bonuses"),
+        ]
 
     @property
     def number(self):
@@ -60,10 +92,53 @@ class WorkOrder(models.Model):
     def hours_logged(self):
         return sum((a.hours for v in self.visits.all() for a in v.assignments.all()), Decimal("0"))
 
+    @property
+    def estimated_hours(self):
+        """Labor hours sold on the quote, adjusted by signed change orders. Only installs have an estimate."""
+        if self.wo_type != self.Type.INSTALL or not self.quote_id:
+            return None
+        quote = self.quote
+        hours = sum((line.quantity for line in quote.lines.all() if line.kind == "labor"), Decimal("0"))
+        for change_order in quote.signed_change_orders:
+            for line in change_order.lines.all():
+                if line.kind == "labor":
+                    hours += line.quantity if line.direction == "add" else -line.quantity
+        return hours
+
+    @property
+    def hours_saved(self):
+        estimated = self.estimated_hours
+        return None if estimated is None else estimated - self.hours_logged
+
+    @property
+    def labor_cost(self):
+        """Actual hours at the company labor rate."""
+        return money(self.hours_logged * settings.LABOR_COST_RATE)
+
+    @property
+    def bonus(self):
+        """Install bonus for the lead technician: a share of the saved hours at the labor rate. Nothing is deducted for going over."""
+        saved = self.hours_saved
+        if saved is None or saved <= 0:
+            return Decimal("0.00")
+        return money(saved * settings.LABOR_COST_RATE * settings.INSTALL_BONUS_PERCENT / 100)
+
+    @property
+    def bonus_earned(self):
+        return self.status == self.Status.COMPLETE
+
     def default_billing(self):
         return self.Billing.REPAIR_PLAN if self.site.active_plan else self.Billing.BILLABLE
 
     def clean(self):
+        if self.wo_type == self.Type.INTERNAL:
+            if not self.internal_category_id:
+                raise ValidationError("Pick what the internal time was spent on.")
+            return
+        if self.wo_type and not self.site_id:
+            raise ValidationError("Pick the site this work order is for.")
+        if self.internal_category_id:
+            raise ValidationError("Only internal time work orders take an internal time category.")
         if self.wo_type != self.Type.SERVICE:
             return
         if self.billing and self.billing != self.Billing.REPAIR_PLAN and self.site_id and self.site.active_plan:
@@ -79,7 +154,8 @@ class WorkOrder(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.number} {self.get_wo_type_display()} - {self.site.number}"
+        where = self.site.number if self.site_id else (self.internal_category or "internal")
+        return f"{self.number} {self.get_wo_type_display()} - {where}"
 
 
 class Visit(models.Model):

@@ -5,12 +5,13 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from crm.models import Contractor, Customer, Site
-from fsm.models import Skill, TechProfile, Visit, VisitAssignment, WorkOrder
+from crm.models import ChangeOrder, ChangeOrderLine, Contractor, Customer, Quote, QuoteLine, Site
+from inventory.models import CatalogItem
+from fsm.models import InternalTimeCategory, Skill, TechProfile, Visit, VisitAssignment, WorkOrder
 
 User = get_user_model()
 
@@ -217,3 +218,253 @@ class TechnicianAssignmentTests(TestCase):
         self.act("start_job", first)
         first.refresh_from_db()
         self.assertIsNotNone(first.started_at)
+
+
+class InternalTimeTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command("setup_roles")
+        customer = Customer.objects.create(name="Test Co")
+        cls.site = Site.objects.create(customer=customer, address="1 Main St")
+        cls.quote = Quote.objects.create(site=cls.site, stage="quote_sent")
+        cls.sales_help = InternalTimeCategory.objects.get(name="Sales help")
+        cls.cabling = Skill.objects.create(name="Cabling")
+        cls.tech = User.objects.create_user(username="alex", password="pw", is_staff=True)
+        cls.tech.groups.add(Group.objects.get(name="Technician"))
+        TechProfile.objects.create(user=cls.tech).skills.add(cls.cabling)
+
+    def internal_wo(self, **fields):
+        return WorkOrder.objects.create(wo_type="internal", internal_category=self.sales_help, **fields)
+
+    def log_hours(self, work_order, hours):
+        assignment = VisitAssignment.objects.create(
+            visit=Visit.objects.create(work_order=work_order), tech=self.tech, skill=self.cabling,
+        )
+        assignment.start()
+        assignment.started_at = timezone.now() - timedelta(hours=hours)
+        assignment.save()
+        assignment.stop()
+        return assignment
+
+    def test_the_standard_categories_exist(self):
+        self.assertEqual(
+            set(InternalTimeCategory.objects.values_list("name", flat=True)), {"Sales help", "Misc time"},
+        )
+
+    def test_internal_time_needs_a_category_but_not_a_site(self):
+        with self.assertRaisesMessage(ValidationError, "what the internal time"):
+            WorkOrder(wo_type="internal").full_clean()
+        WorkOrder(wo_type="internal", internal_category=self.sales_help).full_clean()
+        self.assertIn("Sales help", str(self.internal_wo()))
+
+    def test_other_work_orders_still_need_a_site_and_no_category(self):
+        with self.assertRaisesMessage(ValidationError, "Pick the site"):
+            WorkOrder(wo_type="install").full_clean()
+        with self.assertRaisesMessage(ValidationError, "Only internal time"):
+            WorkOrder(wo_type="install", site=self.site, internal_category=self.sales_help).full_clean()
+
+    def test_a_walk_through_never_begins_the_install(self):
+        walk_through = self.internal_wo(site=self.site, quote=self.quote)
+        self.log_hours(walk_through, 2)
+        walk_through.refresh_from_db()
+        self.assertEqual(walk_through.status, WorkOrder.Status.IN_PROGRESS)
+        self.assertFalse(walk_through.install_begun)
+        self.assertFalse(self.quote.install_begun)
+
+    def test_hours_land_on_the_internal_work_order_and_show_on_the_quote(self):
+        install = WorkOrder.objects.create(wo_type="install", site=self.site, quote=self.quote)
+        walk_through = self.internal_wo(site=self.site, quote=self.quote)
+        self.log_hours(walk_through, 3)
+        self.assertEqual(walk_through.hours_logged, Decimal("3.00"))
+        self.assertEqual(install.hours_logged, Decimal("0"))
+        self.assertEqual(self.quote.presale_hours, Decimal("3.00"))
+
+    def test_misc_time_needs_no_site_or_quote(self):
+        shop = WorkOrder.objects.create(
+            wo_type="internal", internal_category=InternalTimeCategory.objects.get(name="Misc time"),
+        )
+        self.log_hours(shop, 1)
+        self.assertEqual(shop.hours_logged, Decimal("1.00"))
+        self.assertEqual(self.quote.presale_hours, Decimal("0"))
+
+    def test_a_manager_can_create_internal_time_without_a_site_from_the_form(self):
+        manager = User.objects.create_user(username="mgr", password="pw", is_staff=True)
+        manager.groups.add(Group.objects.get(name="Install Manager"))
+        self.client.force_login(manager)
+        response = self.client.post(reverse("admin:fsm_workorder_add"), {
+            "wo_type": "internal", "internal_category": self.sales_help.pk, "status": "open", "description": "Walk-through",
+            "visits-TOTAL_FORMS": "0", "visits-INITIAL_FORMS": "0", "visits-MIN_NUM_FORMS": "0", "visits-MAX_NUM_FORMS": "1000",
+        }, follow=True)
+        self.assertContains(response, "was added successfully")
+        self.assertEqual(WorkOrder.objects.get().site, None)
+
+    def test_the_form_still_demands_a_site_for_an_install(self):
+        manager = User.objects.create_user(username="mgr", password="pw", is_staff=True)
+        manager.groups.add(Group.objects.get(name="Install Manager"))
+        self.client.force_login(manager)
+        response = self.client.post(reverse("admin:fsm_workorder_add"), {
+            "wo_type": "install", "status": "open",
+            "visits-TOTAL_FORMS": "0", "visits-INITIAL_FORMS": "0", "visits-MIN_NUM_FORMS": "0", "visits-MAX_NUM_FORMS": "1000",
+        })
+        self.assertContains(response, "Pick the site")
+        self.assertEqual(WorkOrder.objects.count(), 0)
+
+    def test_a_technician_can_start_and_stop_an_internal_assignment(self):
+        assignment = self.log_hours(self.internal_wo(), 1)
+        self.assertIsNotNone(assignment.ended_at)
+
+    def test_the_quote_page_shows_pre_sale_time(self):
+        manager = User.objects.create_user(username="mgr", password="pw", is_staff=True)
+        manager.groups.add(Group.objects.get(name="Install Manager"))
+        self.client.force_login(manager)
+        url = reverse("admin:crm_quote_change", args=[self.quote.pk])
+        self.assertIn("None logged", self.client.get(url).content.decode())
+        self.log_hours(self.internal_wo(site=self.site, quote=self.quote), 2)
+        self.assertIn("2 hours of technician time", self.client.get(url).content.decode())
+
+
+class LaborBonusTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command("setup_roles")
+        customer = Customer.objects.create(name="Test Co")
+        cls.site = Site.objects.create(customer=customer, address="1 Main St")
+        cls.labor = CatalogItem.objects.create(
+            sku="LAB", name="Technician labor", kind=CatalogItem.Kind.LABOR, unit_cost=45, list_price=95, min_price=80,
+        )
+        cls.camera = CatalogItem.objects.create(sku="CAM", name="Camera", unit_cost=100, list_price=200, min_price=150)
+        cls.cabling = Skill.objects.create(name="Cabling")
+        cls.lead = cls.make_tech("lead")
+        cls.helper = cls.make_tech("helper")
+
+    @classmethod
+    def make_tech(cls, username):
+        user = User.objects.create_user(username=username, password="pw", is_staff=True)
+        user.groups.add(Group.objects.get(name="Technician"))
+        TechProfile.objects.create(user=user).skills.add(cls.cabling)
+        return user
+
+    def install(self, estimated=20, status=WorkOrder.Status.OPEN, lead="lead"):
+        quote = Quote.objects.create(site=self.site, stage="quote_sent")
+        self.labor_line = QuoteLine.objects.create(quote=quote, item=self.labor, quantity=estimated)
+        QuoteLine.objects.create(quote=quote, item=self.camera, quantity=5)
+        return WorkOrder.objects.create(
+            wo_type="install", site=self.site, quote=quote, status=status,
+            lead_tech=User.objects.get(username=lead) if lead else None,
+        )
+
+    def log(self, work_order, tech, minutes):
+        assignment = VisitAssignment.objects.create(
+            visit=Visit.objects.create(work_order=work_order), tech=tech, skill=self.cabling,
+        )
+        assignment.start()
+        assignment.started_at = timezone.now() - timedelta(minutes=minutes)
+        assignment.save()
+        assignment.stop()
+
+    def manager(self, role="Install Manager", username="mgr"):
+        user = User.objects.create_user(username=username, password="pw", is_staff=True)
+        user.groups.add(Group.objects.get(name=role))
+        return user
+
+    def test_the_bonus_is_twenty_percent_of_the_saved_hours_at_the_labor_rate(self):
+        work_order = self.install(estimated=20)
+        self.log(work_order, self.lead, 600)
+        self.assertEqual(work_order.estimated_hours, Decimal("20.00"))
+        self.assertEqual(work_order.hours_saved, Decimal("10.00"))
+        self.assertEqual(work_order.labor_cost, Decimal("450.00"))
+        self.assertEqual(work_order.bonus, Decimal("90.00"))
+
+    def test_hours_from_every_technician_count_against_the_estimate(self):
+        work_order = self.install(estimated=20)
+        self.log(work_order, self.lead, 360)
+        self.log(work_order, self.helper, 240)
+        self.assertEqual(work_order.hours_logged, Decimal("10.00"))
+        self.assertEqual(work_order.bonus, Decimal("90.00"))
+
+    def test_nothing_is_paid_or_deducted_at_or_over_the_estimate(self):
+        work_order = self.install(estimated=20)
+        self.log(work_order, self.lead, 1200)
+        self.assertEqual((work_order.hours_saved, work_order.bonus), (Decimal("0.00"), Decimal("0.00")))
+        over = self.install(estimated=20)
+        self.log(over, self.lead, 1500)
+        self.assertEqual((over.hours_saved, over.bonus), (Decimal("-5.00"), Decimal("0.00")))
+
+    def test_fractional_hours_round_to_the_cent(self):
+        work_order = self.install(estimated=20)
+        self.log(work_order, self.lead, 441)
+        self.assertEqual(work_order.hours_logged, Decimal("7.35"))
+        self.assertEqual(work_order.bonus, Decimal("113.85"))
+
+    def test_the_rate_and_percent_come_from_settings(self):
+        work_order = self.install(estimated=20)
+        self.log(work_order, self.lead, 600)
+        with override_settings(LABOR_COST_RATE=Decimal("50"), INSTALL_BONUS_PERCENT=Decimal("10")):
+            self.assertEqual(work_order.bonus, Decimal("50.00"))
+
+    def test_only_signed_change_orders_adjust_the_estimate_and_only_labor_counts(self):
+        work_order = self.install(estimated=20)
+        quote = work_order.quote
+        signed = ChangeOrder.objects.create(quote=quote, reason="Scope change", status="signed", signed_by="Pat")
+        ChangeOrderLine.objects.create(change_order=signed, direction="add", item=self.labor, quantity=4)
+        ChangeOrderLine.objects.create(change_order=signed, direction="remove", quote_line=self.labor_line, quantity=2)
+        ChangeOrderLine.objects.create(change_order=signed, direction="add", item=self.camera, quantity=9)
+        pending = ChangeOrder.objects.create(quote=quote, reason="Not signed", status="priced")
+        ChangeOrderLine.objects.create(change_order=pending, direction="add", item=self.labor, quantity=50)
+        self.assertEqual(work_order.estimated_hours, Decimal("22.00"))
+
+    def test_only_installs_have_an_estimate_or_a_bonus(self):
+        service = WorkOrder.objects.create(wo_type="service", site=self.site)
+        self.assertEqual((service.estimated_hours, service.hours_saved, service.bonus), (None, None, Decimal("0.00")))
+        no_quote = WorkOrder.objects.create(wo_type="install", site=self.site)
+        self.assertIsNone(no_quote.estimated_hours)
+        self.assertEqual(no_quote.bonus, Decimal("0.00"))
+
+    def test_a_bonus_is_earned_only_once_the_install_is_complete(self):
+        work_order = self.install(estimated=20)
+        self.assertFalse(work_order.bonus_earned)
+        work_order.status = WorkOrder.Status.COMPLETE
+        self.assertTrue(work_order.bonus_earned)
+
+    def test_the_lead_technician_must_be_a_technician(self):
+        User.objects.create_user(username="plainuser", password="pw")
+        self.client.force_login(self.manager())
+        page = self.client.get(reverse("admin:fsm_workorder_add")).content.decode()
+        select = page[page.index('name="lead_tech"'):]
+        select = select[:select.index("</select>")]
+        self.assertIn("lead", select)
+        self.assertNotIn("plainuser", select)
+
+    def test_managers_see_the_labor_section_and_others_do_not(self):
+        work_order = self.install(estimated=20)
+        self.log(work_order, self.lead, 600)
+        url = reverse("admin:fsm_workorder_change", args=[work_order.pk])
+        self.client.force_login(self.manager())
+        page = self.client.get(url).content.decode()
+        self.assertIn("Labor and bonus", page)
+        self.assertIn("$90.00 for lead", page)
+        self.assertIn("projected", page)
+        self.client.force_login(self.manager("Sales", "rep"))
+        self.assertNotIn("Labor and bonus", self.client.get(url).content.decode())
+        self.client.force_login(self.lead)
+        self.assertNotIn("Labor and bonus", self.client.get(url).content.decode())
+
+    def test_the_report_totals_earned_bonuses_by_lead_and_is_for_managers(self):
+        done = self.install(estimated=20, status=WorkOrder.Status.COMPLETE)
+        self.log(done, self.lead, 600)
+        running = self.install(estimated=20)
+        self.log(running, self.lead, 300)
+        unset = self.install(estimated=20, status=WorkOrder.Status.COMPLETE, lead=None)
+        self.log(unset, self.helper, 600)
+        url = reverse("admin:fsm_workorder_labor_report")
+
+        self.client.force_login(self.manager("Operations Manager"))
+        page = self.client.get(url).content.decode()
+        self.assertIn("$180.00", page)
+        self.assertIn("(projected)", page)
+        self.assertIn("No lead technician set", page)
+
+        self.client.force_login(self.lead)
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.client.force_login(self.manager("Sales", "rep"))
+        self.assertEqual(self.client.get(url).status_code, 403)

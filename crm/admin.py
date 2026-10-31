@@ -16,7 +16,7 @@ from django.utils.safestring import mark_safe
 from .forms import NewLeadForm
 from .models import (
     ChangeOrder, ChangeOrderLine, Contractor, Customer, Notification, Quote, QuoteLine, QuoteRevision, RepairPlan,
-    RepairPlanEnrollment, Site, System, SystemType, notify,
+    RepairPlanEnrollment, Site, System, SystemType, notify, plain,
 )
 
 
@@ -363,7 +363,7 @@ class QuoteAdmin(admin.ModelAdmin):
         return (
             (None, {"fields": (
                 "number", "site", "stage", "system_types", "salesperson", "follow_up_on", "notes", "sent_on", "valid_until",
-                "document_link",
+                "document_link", "presale_time",
             )}),
             ("Pricing (save to refresh totals)", {"fields": pricing}),
             ("Revisions and change orders", {"fields": ("revision_note", "revise_link", "change_order_links")}),
@@ -385,6 +385,7 @@ class QuoteAdmin(admin.ModelAdmin):
         fields = [
             "number", "sent_on", "document_link", "price_total", "cost_total", "margin_total", "margin_pct",
             "deposit_amount_due", "exceptions_note", "contract_value", "revision_note", "revise_link", "change_order_links",
+            "presale_time",
         ]
         user = request.user
         if not user.has_perm("crm.approve_exceptions"):
@@ -394,6 +395,13 @@ class QuoteAdmin(admin.ModelAdmin):
         if sent_to_ops(obj) and not user.has_perm("crm.override_sent_quote"):
             fields += [f for f in EDITABLE_QUOTE_FIELDS if f not in fields]
         return fields
+
+    @admin.display(description="Pre-sale tech time")
+    def presale_time(self, obj):
+        if not obj.pk:
+            return "-"
+        hours = obj.presale_hours
+        return f"{plain(hours)} hours of technician time (walk-throughs and sales help)" if hours else "None logged."
 
     @admin.display(description="Revision")
     def revision_note(self, obj):

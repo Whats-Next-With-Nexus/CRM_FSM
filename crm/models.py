@@ -352,6 +352,11 @@ class Quote(models.Model):
         return self.work_orders.filter(wo_type="install", visits__started_at__isnull=False).exists()
 
     @property
+    def presale_hours(self):
+        """Technician hours logged on internal time work orders linked to this quote, such as a pre-quote walk-through."""
+        return sum((wo.hours_logged for wo in self.work_orders.filter(wo_type="internal")), Decimal("0"))
+
+    @property
     def signed_change_orders(self):
         return [co for co in self.change_orders.all() if co.status == ChangeOrder.Status.SIGNED]
 
@@ -757,6 +762,10 @@ class ChangeOrderLine(models.Model):
 
     class Meta:
         ordering = ["id"]
+
+    @property
+    def kind(self):
+        return self.quote_line.kind if self.direction == self.Direction.REMOVE else self.item.kind
 
     @property
     def amount(self):

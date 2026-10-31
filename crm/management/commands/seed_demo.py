@@ -120,6 +120,8 @@ class Command(BaseCommand):
 
         tech, _ = User.objects.get_or_create(username="tech", defaults={"email": "tech@example.com", "is_staff": True})
         TechProfile.objects.get_or_create(user=tech)[0].skills.set(Skill.objects.all())
+        install_wo.lead_tech = tech
+        install_wo.save(update_fields=["lead_tech"])
         VisitAssignment.objects.create(
             visit=Visit.objects.create(work_order=install_wo, scheduled_for=timezone.localdate()),
             tech=tech, skill=Skill.objects.get(name="Cabling and pre-wire"),

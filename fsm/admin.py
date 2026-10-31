@@ -1,7 +1,12 @@
-from django.contrib import admin, messages
-from django.core.exceptions import ValidationError
+from decimal import Decimal
 
-from .models import Skill, TechProfile, Visit, VisitAssignment, WorkOrder
+from django.conf import settings
+from django.contrib import admin, messages
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.template.response import TemplateResponse
+from django.urls import path
+
+from .models import InternalTimeCategory, Skill, TechProfile, Visit, VisitAssignment, WorkOrder
 
 
 class VisitInline(admin.TabularInline):
@@ -14,15 +19,71 @@ class VisitInline(admin.TabularInline):
 
 @admin.register(WorkOrder)
 class WorkOrderAdmin(admin.ModelAdmin):
-    list_display = ("number", "wo_type", "status", "site", "system", "billing")
-    list_filter = ("wo_type", "status", "billing")
+    list_display = ("number", "wo_type", "internal_category", "status", "site", "system", "billing", "hours_logged")
+    list_filter = ("wo_type", "internal_category", "status", "billing")
     search_fields = ("site__address", "site__customer__name", "description")
-    readonly_fields = ("number", "hours_logged")
+    readonly_fields = ("number", "hours_logged", "estimated_display", "saved_display", "labor_cost_display", "bonus_display")
     inlines = [VisitInline]
-    fieldsets = (
-        (None, {"fields": ("number", "wo_type", "status", "site", "system", "quote", "description", "hours_logged")}),
-        ("Service billing", {"fields": ("billing", "billing_override_reason")}),
-    )
+
+    def get_urls(self):
+        custom = [path("labor-report/", self.admin_site.admin_view(self.labor_report_view), name="fsm_workorder_labor_report")]
+        return custom + super().get_urls()
+
+    def labor_report_view(self, request):
+        if not request.user.has_perm("fsm.view_labor_bonus"):
+            raise PermissionDenied
+        installs = WorkOrder.objects.filter(wo_type=WorkOrder.Type.INSTALL).select_related("quote", "site", "lead_tech")
+        if request.GET.get("status") == "complete":
+            installs = installs.filter(status=WorkOrder.Status.COMPLETE)
+        rows, by_lead = [], {}
+        for work_order in installs.order_by("-id"):
+            rows.append(work_order)
+            if work_order.bonus_earned and work_order.bonus:
+                lead = work_order.lead_tech.get_username() if work_order.lead_tech else "No lead technician set"
+                by_lead[lead] = by_lead.get(lead, Decimal("0")) + work_order.bonus
+        context = {
+            **self.admin_site.each_context(request), "title": "Install labor and bonus report", "rows": rows,
+            "by_lead": sorted(by_lead.items()), "earned_total": sum(by_lead.values(), Decimal("0")),
+            "rate": settings.LABOR_COST_RATE, "percent": settings.INSTALL_BONUS_PERCENT, "opts": self.model._meta,
+            "complete_only": request.GET.get("status") == "complete",
+        }
+        return TemplateResponse(request, "admin/fsm/workorder/labor_report.html", context)
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = [
+            (None, {"fields": (
+                "number", "wo_type", "internal_category", "status", "site", "system", "quote", "lead_tech", "description",
+                "hours_logged",
+            )}),
+            ("Service billing", {"fields": ("billing", "billing_override_reason")}),
+        ]
+        if obj and obj.wo_type == WorkOrder.Type.INSTALL and request.user.has_perm("fsm.view_labor_bonus"):
+            fieldsets.append(("Labor and bonus", {"fields": (
+                "estimated_display", "hours_logged", "saved_display", "labor_cost_display", "bonus_display",
+            )}))
+        return fieldsets
+
+    @admin.display(description="Estimated hours")
+    def estimated_display(self, obj):
+        hours = obj.estimated_hours
+        return "No quote linked." if hours is None else f"{hours:f}".rstrip("0").rstrip(".") + " hours sold, including signed change orders"
+
+    @admin.display(description="Hours saved")
+    def saved_display(self, obj):
+        saved = obj.hours_saved
+        if saved is None:
+            return "-"
+        return f"{saved:f}".rstrip("0").rstrip(".") + (" hours" if saved > 0 else " hours (over the estimate, no bonus)" if saved < 0 else " hours")
+
+    @admin.display(description="Labor cost")
+    def labor_cost_display(self, obj):
+        return f"${obj.labor_cost:,.2f} ({settings.LABOR_COST_RATE:f}/hr)"
+
+    @admin.display(description="Lead technician bonus")
+    def bonus_display(self, obj):
+        who = obj.lead_tech.get_username() if obj.lead_tech else "no lead technician set"
+        state = "earned" if obj.bonus_earned else "projected until the install is complete"
+        return f"${obj.bonus:,.2f} for {who}, {state}"
 
     def get_readonly_fields(self, request, obj=None):
         fields = list(super().get_readonly_fields(request, obj))
@@ -40,6 +101,11 @@ class WorkOrderAdmin(admin.ModelAdmin):
 
 @admin.register(Skill)
 class SkillAdmin(admin.ModelAdmin):
+    list_display = ("name", "active")
+
+
+@admin.register(InternalTimeCategory)
+class InternalTimeCategoryAdmin(admin.ModelAdmin):
     list_display = ("name", "active")
 
 
@@ -82,7 +148,7 @@ class VisitAssignmentAdmin(admin.ModelAdmin):
     """Technicians see only their own assignments here and can start and stop the job; managers see everyone's."""
 
     list_display = ("visit", "site", "tech", "skill", "started_at", "ended_at", "hours")
-    list_filter = ("skill", "tech")
+    list_filter = ("visit__work_order__wo_type", "visit__work_order__internal_category", "skill", "tech")
     actions = ["start_job", "stop_job"]
 
     def _is_manager(self, request):

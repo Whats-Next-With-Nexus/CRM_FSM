@@ -19,11 +19,11 @@ MANAGER = {
     ("crm", "system"): EDIT, ("crm", "systemtype"): VIEW, ("crm", "repairplan"): VIEW,
     ("crm", "repairplanenrollment"): VIEW, ("inventory", "catalogitem"): EDIT, ("crm", "notification"): REVIEW,
     ("fsm", "workorder"): EDIT, ("fsm", "visit"): FULL, ("fsm", "visitassignment"): FULL,
-    ("fsm", "skill"): EDIT, ("fsm", "techprofile"): EDIT,
+    ("fsm", "skill"): EDIT, ("fsm", "techprofile"): EDIT, ("fsm", "internaltimecategory"): EDIT,
 }
 MANAGER_EXTRAS = [
     ("crm", "quote", "view_costs"), ("crm", "quote", "approve_exceptions"), ("crm", "quote", "decide_intake"),
-    ("crm", "quote", "revise_quote"), ("crm", "changeorder", "set_restocking"),
+    ("crm", "quote", "revise_quote"), ("crm", "changeorder", "set_restocking"), ("fsm", "workorder", "view_labor_bonus"),
 ]
 
 # role -> (model permissions, extra custom permissions). Anything beyond a role is granted per user in the admin.

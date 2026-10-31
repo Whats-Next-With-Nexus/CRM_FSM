@@ -1,0 +1,7 @@
+{% extends "admin/change_list.html" %}
+{% block object-tools-items %}
+  {% if perms.fsm.view_labor_bonus %}
+  <li><a href="{% url 'admin:fsm_workorder_labor_report' %}">Labor and bonus report</a></li>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}
