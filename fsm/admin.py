@@ -3,13 +3,16 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path
 
+from unfold.admin import ModelAdmin, TabularInline
+from unfold.decorators import action, display
 from .models import InternalTimeCategory, Skill, TechProfile, Visit, VisitAssignment, WorkOrder
 
 
-class VisitInline(admin.TabularInline):
+class VisitInline(TabularInline):
     model = Visit
     extra = 0
     fields = ("scheduled_for", "summary", "started_at")
@@ -18,8 +21,20 @@ class VisitInline(admin.TabularInline):
 
 
 @admin.register(WorkOrder)
-class WorkOrderAdmin(admin.ModelAdmin):
-    list_display = ("number", "wo_type", "internal_category", "status", "site", "system", "billing", "hours_logged")
+class WorkOrderAdmin(ModelAdmin):
+    list_display = ("number", "wo_type", "internal_category", "status_label", "site", "system", "billing", "hours_logged")
+    actions_list = ["labor_report_action"]
+
+    @display(
+        description="Status", ordering="status",
+        label={"open": "info", "scheduled": "warning", "in_progress": "warning", "complete": "success", "cancelled": "danger"},
+    )
+    def status_label(self, obj):
+        return obj.status, obj.get_status_display()
+
+    @action(description="Labor and bonus report", icon="payments", permissions=["fsm.view_labor_bonus"])
+    def labor_report_action(self, request):
+        return redirect("admin:fsm_workorder_labor_report")
     list_filter = ("wo_type", "internal_category", "status", "billing")
     search_fields = ("site__address", "site__customer__name", "description")
     readonly_fields = ("number", "hours_logged", "estimated_display", "saved_display", "labor_cost_display", "bonus_display")
@@ -100,17 +115,17 @@ class WorkOrderAdmin(admin.ModelAdmin):
 
 
 @admin.register(Skill)
-class SkillAdmin(admin.ModelAdmin):
+class SkillAdmin(ModelAdmin):
     list_display = ("name", "active")
 
 
 @admin.register(InternalTimeCategory)
-class InternalTimeCategoryAdmin(admin.ModelAdmin):
+class InternalTimeCategoryAdmin(ModelAdmin):
     list_display = ("name", "active")
 
 
 @admin.register(TechProfile)
-class TechProfileAdmin(admin.ModelAdmin):
+class TechProfileAdmin(ModelAdmin):
     list_display = ("user", "skill_list")
     filter_horizontal = ("skills",)
 
@@ -119,7 +134,7 @@ class TechProfileAdmin(admin.ModelAdmin):
         return ", ".join(skill.name for skill in obj.skills.all()) or "-"
 
 
-class AssignmentInline(admin.TabularInline):
+class AssignmentInline(TabularInline):
     model = VisitAssignment
     extra = 1
     fields = ("tech", "skill", "notes", "started_at", "ended_at", "hours_display")
@@ -131,7 +146,7 @@ class AssignmentInline(admin.TabularInline):
 
 
 @admin.register(Visit)
-class VisitAdmin(admin.ModelAdmin):
+class VisitAdmin(ModelAdmin):
     list_display = ("__str__", "work_order", "scheduled_for", "started_at", "crew")
     list_filter = ("scheduled_for",)
     search_fields = ("work_order__site__address", "work_order__site__customer__name")
@@ -144,7 +159,7 @@ class VisitAdmin(admin.ModelAdmin):
 
 
 @admin.register(VisitAssignment)
-class VisitAssignmentAdmin(admin.ModelAdmin):
+class VisitAssignmentAdmin(ModelAdmin):
     """Technicians see only their own assignments here and can start and stop the job; managers see everyone's."""
 
     list_display = ("visit", "site", "tech", "skill", "started_at", "ended_at", "hours")

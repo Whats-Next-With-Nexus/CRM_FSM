@@ -1,40 +1,7 @@
 {% extends "admin/base_site.html" %}
-{% block extrastyle %}{{ block.super }}
-<style>
-  .ov { display: grid; gap: 20px; }
-  .ov h1 { margin: 0; }
-  .ov .sub { color: var(--body-quiet-color); margin: 2px 0 0; }
-  .ov .head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: flex-start; }
-  .ov .actions a { display: inline-block; margin-left: 6px; padding: 6px 12px; border-radius: 4px; background: var(--darkened-bg); border: 1px solid var(--border-color); text-decoration: none; }
-  .ov .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; border: 1px solid var(--border-color); background: var(--darkened-bg); color: var(--body-fg); vertical-align: middle; }
-  .ov .badge.warn { background: #fdecea; color: #8a1c13; border-color: #f0b8b3; }
-  .ov .badge.ok { background: #e6f4ea; color: #1e6b34; border-color: #b5dcc0; }
-  .ov .badge.info { background: #e8f0fb; color: #1f4e79; border-color: #b9cdea; }
-  .ov .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-  .ov .stat { border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 14px; background: var(--darkened-bg); }
-  .ov .stat b { display: block; font-size: 22px; line-height: 1.2; }
-  .ov .stat span { color: var(--body-quiet-color); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  .ov .panel { border: 1px solid var(--border-color); border-radius: 6px; padding: 14px 16px; }
-  .ov .panel h2 { margin: 0 0 8px; font-size: 16px; background: none; color: var(--body-fg); padding: 0; text-transform: none; }
-  .ov .panel h3 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--body-quiet-color); }
-  .ov .attention { border-left: 4px solid #d9822b; }
-  .ov .attention ul { margin: 0; padding-left: 18px; }
-  .ov table { width: 100%; }
-  .ov td.num, .ov th.num { text-align: right; white-space: nowrap; }
-  .ov .muted { color: var(--body-quiet-color); }
-  .ov .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-  .ov .site-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
-  .ov .note { white-space: pre-line; }
-</style>
-{% endblock %}
-{% block breadcrumbs %}
-<div class="breadcrumbs">
-  <a href="{% url 'admin:index' %}">Home</a> &rsaquo;
-  <a href="{% url 'admin:crm_customer_changelist' %}">Customers</a> &rsaquo; {{ ov.customer.name }}
-</div>
-{% endblock %}
 {% block content_title %}{% endblock %}
 {% block content %}
+{% include "crm/_page_styles.html" %}
 <div class="ov">
   <div class="head">
     <div>
@@ -50,22 +17,22 @@
         {% if ov.customer.email %}&middot; {{ ov.customer.email }}{% endif %}
       </p>
     </div>
-    <div class="actions">
-      {% if ov.can_edit %}<a href="{% url 'admin:crm_customer_change' ov.customer.pk %}">Edit customer</a>{% endif %}
-      {% if ov.can_add_site %}<a href="{% url 'admin:crm_site_add' %}?customer={{ ov.customer.pk }}">Add site</a>{% endif %}
+    <div class="actions-row">
+      {% if ov.can_edit %}<a class="btn" href="{% url 'admin:crm_customer_change' ov.customer.pk %}">Edit customer</a>{% endif %}
+      {% if ov.can_add_site %}<a class="btn" href="{% url 'admin:crm_site_add' %}?customer={{ ov.customer.pk }}">Add site</a>{% endif %}
     </div>
   </div>
 
-  {% if ov.customer.notes %}<div class="panel"><h2>Notes</h2><div class="note">{{ ov.customer.notes }}</div></div>{% endif %}
+  {% if ov.customer.notes %}<div class="panel"><h2>Notes</h2><div class="note muted">{{ ov.customer.notes }}</div></div>{% endif %}
 
   <div class="stats">
-    <div class="stat"><b>{{ ov.summary.sites }}</b><span>Sites</span></div>
+    <div class="stat"><small>Sites</small><b>{{ ov.summary.sites }}</b></div>
     {% if ov.sees_quotes %}
-    <div class="stat"><b>${{ ov.summary.won_value|floatformat:"0g" }}</b><span>Won contract value</span></div>
-    <div class="stat"><b>{{ ov.summary.open_quotes }}</b><span>Open quotes (${{ ov.summary.open_value|floatformat:"0g" }})</span></div>
-    <div class="stat"><b>{{ ov.summary.next_follow_up|date:"M j"|default:"None" }}</b><span>Next follow-up</span></div>
+    <div class="stat"><small>Won contract value</small><b>${{ ov.summary.won_value|floatformat:"0g" }}</b></div>
+    <div class="stat"><small>Open quotes</small><b>{{ ov.summary.open_quotes }}</b><span>${{ ov.summary.open_value|floatformat:"0g" }} pending</span></div>
+    <div class="stat"><small>Next follow-up</small><b>{{ ov.summary.next_follow_up|date:"M j"|default:"None" }}</b></div>
     {% endif %}
-    {% if ov.sees_work_orders %}<div class="stat"><b>{{ ov.summary.open_work_orders }}</b><span>Open work orders</span></div>{% endif %}
+    {% if ov.sees_work_orders %}<div class="stat"><small>Open work orders</small><b>{{ ov.summary.open_work_orders }}</b></div>{% endif %}
   </div>
 
   {% if ov.attention %}
@@ -82,18 +49,18 @@
     <div class="site-head">
       <div>
         <h2>{{ card.site.number }}{% if card.site.name %} &middot; {{ card.site.name }}{% endif %}</h2>
-        <div class="muted">
+        <p class="muted">
           {{ card.site.address }}{% if card.site.city %}, {{ card.site.city }}{% endif %}{% if card.site.state %}, {{ card.site.state }}{% endif %} {{ card.site.zip_code }}
-        </div>
+        </p>
       </div>
-      <div>
+      <div class="tags">
         {% if ov.sees_plans %}
           {% if card.plan %}<span class="badge ok">Repair plan: {{ card.plan.name }}</span>{% else %}<span class="badge">No repair plan</span>{% endif %}
         {% endif %}
-        {% if ov.can_add_quote %}<a class="badge" href="{% url 'admin:crm_quote_add' %}?site={{ card.site.pk }}">New quote</a>{% endif %}
+        {% if ov.can_add_quote %}<a class="btn" href="{% url 'admin:crm_quote_add' %}?site={{ card.site.pk }}">New quote</a>{% endif %}
       </div>
     </div>
-    {% if card.site.access_notes %}<p class="note"><b>Access:</b> {{ card.site.access_notes }}</p>{% endif %}
+    {% if card.site.access_notes %}<p class="note" style="margin-top:8px"><b>Access:</b> {{ card.site.access_notes }}</p>{% endif %}
 
     {% if ov.sees_systems %}
     <h3>Installed systems</h3>

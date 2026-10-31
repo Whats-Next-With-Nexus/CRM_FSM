@@ -14,6 +14,8 @@ import os
 from decimal import Decimal
 from pathlib import Path
 
+from django.urls import reverse_lazy
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -42,9 +44,107 @@ QUOTE_TERMS = (
 ALLOWED_HOSTS = []
 
 
+def _can(*perms):
+    return lambda request: all(request.user.has_perm(perm) for perm in perms)
+
+
+def _item(title, icon, url_name, perm):
+    return {"title": title, "icon": icon, "link": reverse_lazy(url_name), "permission": _can(perm)}
+
+
+# Admin look: Unfold with a navy base and blue accent. The two palettes below are the only place colors are chosen.
+UNFOLD = {
+    "SITE_TITLE": "CRM FSM",
+    "SITE_HEADER": "CRM FSM",
+    "SITE_SUBHEADER": "Sales and field service",
+    "SITE_SYMBOL": "shield",
+    "SHOW_HISTORY": True,
+    "BORDER_RADIUS": "8px",
+    "COLORS": {
+        "base": {
+            "50": "oklch(98.4% .003 247.858)",
+            "100": "oklch(96.8% .007 247.896)",
+            "200": "oklch(92.9% .013 255.508)",
+            "300": "oklch(86.9% .022 252.894)",
+            "400": "oklch(70.4% .04 256.788)",
+            "500": "oklch(55.4% .046 257.417)",
+            "600": "oklch(44.6% .043 257.281)",
+            "700": "oklch(37.2% .044 257.287)",
+            "800": "oklch(27.9% .041 260.031)",
+            "900": "oklch(20.8% .042 265.755)",
+            "950": "oklch(12.9% .042 264.695)",
+        },
+        "primary": {
+            "50": "oklch(97% .014 254.604)",
+            "100": "oklch(93.2% .032 255.585)",
+            "200": "oklch(88.2% .059 254.128)",
+            "300": "oklch(80.9% .105 251.813)",
+            "400": "oklch(70.7% .165 254.624)",
+            "500": "oklch(62.3% .214 259.815)",
+            "600": "oklch(54.6% .245 262.881)",
+            "700": "oklch(48.8% .243 264.376)",
+            "800": "oklch(42.4% .199 265.638)",
+            "900": "oklch(37.9% .146 265.522)",
+            "950": "oklch(28.2% .091 267.935)",
+        },
+    },
+    "COMMAND": {"search_models": True},
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {"items": [{"title": "Dashboard", "icon": "dashboard", "link": reverse_lazy("admin:index")}]},
+            {
+                "title": "Sales",
+                "separator": True,
+                "items": [
+                    _item("Quotes", "request_quote", "admin:crm_quote_changelist", "crm.view_quote"),
+                    _item("Customers", "groups", "admin:crm_customer_changelist", "crm.view_customer"),
+                    _item("Sites", "location_on", "admin:crm_site_changelist", "crm.view_site"),
+                    _item("Systems", "videocam", "admin:crm_system_changelist", "crm.view_system"),
+                ],
+            },
+            {
+                "title": "Operations",
+                "separator": True,
+                "items": [
+                    _item("Work orders", "assignment", "admin:fsm_workorder_changelist", "fsm.view_workorder"),
+                    _item("Change orders", "published_with_changes", "admin:crm_changeorder_changelist", "crm.view_changeorder"),
+                    _item("Visits", "event", "admin:fsm_visit_changelist", "fsm.view_visit"),
+                    _item("Visit assignments", "engineering", "admin:fsm_visitassignment_changelist", "fsm.view_visitassignment"),
+                    _item("Notifications", "notifications", "admin:crm_notification_changelist", "crm.view_notification"),
+                ],
+            },
+            {
+                "title": "Catalog and setup",
+                "separator": True,
+                "items": [
+                    _item("Catalog items", "inventory_2", "admin:inventory_catalogitem_changelist", "inventory.view_catalogitem"),
+                    _item("System types", "category", "admin:crm_systemtype_changelist", "crm.view_systemtype"),
+                    _item("Repair plans", "health_and_safety", "admin:crm_repairplan_changelist", "crm.view_repairplan"),
+                    _item("Skills", "military_tech", "admin:fsm_skill_changelist", "fsm.view_skill"),
+                    _item("Tech profiles", "badge", "admin:fsm_techprofile_changelist", "fsm.view_techprofile"),
+                    _item("Internal time categories", "schedule", "admin:fsm_internaltimecategory_changelist", "fsm.view_internaltimecategory"),
+                ],
+            },
+            {
+                "title": "Access",
+                "separator": True,
+                "items": [
+                    _item("Contractors", "handshake", "admin:crm_contractor_changelist", "crm.view_contractor"),
+                    _item("Users", "person", "admin:auth_user_changelist", "auth.view_user"),
+                    _item("Groups", "shield_person", "admin:auth_group_changelist", "auth.view_group"),
+                ],
+            },
+        ],
+    },
+}
+
+
 # Application definition
 
 INSTALLED_APPS = [
+    'unfold',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',

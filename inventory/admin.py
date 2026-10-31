@@ -1,11 +1,13 @@
 from django.contrib import admin
+from unfold.admin import ModelAdmin
+from unfold.decorators import display
 
 from .models import CatalogItem
 
 
 @admin.register(CatalogItem)
-class CatalogItemAdmin(admin.ModelAdmin):
-    list_display = ("sku", "name", "kind", "unit_cost", "list_price", "min_price", "qty_on_hand", "active")
+class CatalogItemAdmin(ModelAdmin):
+    list_display = ("sku", "name", "kind_label", "unit_cost", "list_price", "min_price", "qty_on_hand", "active")
     list_filter = ("kind", "active")
     search_fields = ("sku", "name")
 
@@ -19,3 +21,7 @@ class CatalogItemAdmin(admin.ModelAdmin):
     def get_exclude(self, request, obj=None):
         exclude = list(super().get_exclude(request, obj) or [])
         return exclude if self._sees_costs(request) else exclude + ["unit_cost"]
+
+    @display(description="Kind", ordering="kind", label=True)
+    def kind_label(self, obj):
+        return obj.get_kind_display()

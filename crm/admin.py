@@ -13,6 +13,9 @@ from django.utils.dateparse import parse_date, parse_datetime
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 
+from unfold.admin import ModelAdmin, TabularInline
+from unfold.decorators import action, display
+from unfold.enums import ActionVariant
 from .forms import NewLeadForm
 from .overview import build_overview
 from .models import (
@@ -57,7 +60,7 @@ class ContractInfoMixin:
 
 
 @admin.register(Contractor)
-class ContractorAdmin(admin.ModelAdmin):
+class ContractorAdmin(ModelAdmin):
     list_display = ("name", "customer_count")
     search_fields = ("name",)
 
@@ -66,7 +69,7 @@ class ContractorAdmin(admin.ModelAdmin):
         return obj.customers.count()
 
 
-class SiteInline(admin.TabularInline):
+class SiteInline(TabularInline):
     model = Site
     extra = 0
     fields = ("name", "address", "city", "state", "zip_code")
@@ -74,8 +77,9 @@ class SiteInline(admin.TabularInline):
 
 
 @admin.register(Customer)
-class CustomerAdmin(ContractInfoMixin, admin.ModelAdmin):
-    list_display = ("name", "number", "overview_link", "status", "lead_source", "contracted_label", "contact_name", "phone")
+class CustomerAdmin(ContractInfoMixin, ModelAdmin):
+    list_display = ("name", "number", "overview_link", "status_label", "lead_source", "contracted_label", "contact_name", "phone")
+    actions_detail = ["overview_action"]
     list_filter = ("status", "lead_source", "contracted_through")
     contract_columns = ("contracted_label",)
     contract_filters = ("contracted_through",)
@@ -101,8 +105,16 @@ class CustomerAdmin(ContractInfoMixin, admin.ModelAdmin):
     def overview_link(self, obj):
         return format_html('<a href="{}">Open</a>', reverse("admin:crm_customer_overview", args=[obj.pk]))
 
+    @display(description="Status", ordering="status", label={"lead": "info", "customer": "success", "lost": "danger", "inactive": "warning"})
+    def status_label(self, obj):
+        return obj.status, obj.get_status_display()
 
-class SystemInline(admin.TabularInline):
+    @action(description="Overview", icon="dashboard", permissions=["crm.view_customer"])
+    def overview_action(self, request, object_id):
+        return redirect("admin:crm_customer_overview", object_id)
+
+
+class SystemInline(TabularInline):
     model = System
     extra = 0
     fields = ("system_type", "bill_direct", "waiver_note", "installed_on")
@@ -115,13 +127,13 @@ class SystemInline(admin.TabularInline):
         return [f for f in fields if f not in CONTRACT_FIELDS]
 
 
-class EnrollmentInline(admin.TabularInline):
+class EnrollmentInline(TabularInline):
     model = RepairPlanEnrollment
     extra = 0
 
 
 @admin.register(Site)
-class SiteAdmin(ContractInfoMixin, admin.ModelAdmin):
+class SiteAdmin(ContractInfoMixin, ModelAdmin):
     list_display = ("number", "customer", "name", "address", "city")
     list_filter = ("customer__contracted_through",)
     contract_filters = ("customer__contracted_through",)
@@ -131,12 +143,12 @@ class SiteAdmin(ContractInfoMixin, admin.ModelAdmin):
 
 
 @admin.register(SystemType)
-class SystemTypeAdmin(admin.ModelAdmin):
+class SystemTypeAdmin(ModelAdmin):
     list_display = ("name", "active")
 
 
 @admin.register(System)
-class SystemAdmin(ContractInfoMixin, admin.ModelAdmin):
+class SystemAdmin(ContractInfoMixin, ModelAdmin):
     list_display = ("__str__", "site", "system_type", "contracted_label")
     list_filter = ("system_type", "bill_direct")
     contract_columns = ("contracted_label",)
@@ -145,7 +157,7 @@ class SystemAdmin(ContractInfoMixin, admin.ModelAdmin):
 
 
 @admin.register(RepairPlan)
-class RepairPlanAdmin(admin.ModelAdmin):
+class RepairPlanAdmin(ModelAdmin):
     list_display = ("name", "monthly_rate")
 
 
@@ -173,7 +185,7 @@ def sent_to_ops(quote):
     return saved_stage(quote) == Quote.Stage.SENT_TO_OPS
 
 
-class QuoteLineInline(admin.TabularInline):
+class QuoteLineInline(TabularInline):
     model = QuoteLine
     extra = 1
     base_fields = ("item", "description", "quantity", "unit_price", "system_type", "floor_display", "price_display")
@@ -251,7 +263,7 @@ def quote_document_data(quote, revision=None):
     return {"quote": doc, "lines": lines, "watermark": "SUPERSEDED"}
 
 
-class QuoteRevisionInline(admin.TabularInline):
+class QuoteRevisionInline(TabularInline):
     model = QuoteRevision
     extra = 0
     fields = ("revision", "created", "created_by", "reason", "copy_link")
@@ -295,8 +307,10 @@ class FollowUpFilter(admin.SimpleListFilter):
 
 
 @admin.register(Quote)
-class QuoteAdmin(admin.ModelAdmin):
-    list_display = ("number", "site", "stage", "ops_status", "price_total", "margin_pct", "follow_up_on", "salesperson", "created")
+class QuoteAdmin(ModelAdmin):
+    list_display = ("number", "site", "stage_label", "ops_label", "price_total", "margin_pct", "follow_up_on", "salesperson", "created")
+    actions_list = ["new_lead_action"]
+    actions_detail = ["customer_overview_action", "printable_action", "revise_action"]
     list_filter = ("stage", "ops_status", FollowUpFilter, "salesperson", "lost_reason")
     search_fields = ("site__address", "site__customer__name")
     filter_horizontal = ("system_types",)
@@ -310,6 +324,36 @@ class QuoteAdmin(admin.ModelAdmin):
             path("<int:pk>/revise/", self.admin_site.admin_view(self.revise_view), name="crm_quote_revise"),
         ]
         return custom + super().get_urls()
+
+    @display(
+        description="Stage", ordering="stage",
+        label={"new_lead": "info", "quote_sent": "warning", "approved": "info", "deposit": "info", "sent_to_ops": "success", "lost": "danger"},
+    )
+    def stage_label(self, obj):
+        return obj.stage, obj.get_stage_display()
+
+    @display(description="Ops", ordering="ops_status", label={"pending": "warning", "accepted": "success", "refused": "danger"})
+    def ops_label(self, obj):
+        return (obj.ops_status, obj.get_ops_status_display()) if obj.ops_status else ("", "-")
+
+    @action(
+        description="New lead", icon="person_add", variant=ActionVariant.PRIMARY,
+        permissions=["crm.add_customer", "crm.add_site", "crm.add_quote"],
+    )
+    def new_lead_action(self, request):
+        return redirect("admin:crm_quote_new_lead")
+
+    @action(description="Customer overview", icon="dashboard", permissions=["crm.view_customer"])
+    def customer_overview_action(self, request, object_id):
+        return redirect("admin:crm_customer_overview", get_object_or_404(Quote, pk=object_id).site.customer_id)
+
+    @action(description="Printable quote", icon="print", permissions=["crm.view_quote"], attrs={"target": "_blank"})
+    def printable_action(self, request, object_id):
+        return redirect("admin:crm_quote_document", object_id)
+
+    @action(description="Revise", icon="edit_note", permissions=["crm.revise_quote"])
+    def revise_action(self, request, object_id):
+        return redirect("admin:crm_quote_revise", object_id)
 
     def new_lead_view(self, request):
         needed = ("crm.add_customer", "crm.add_site", "crm.add_quote")
@@ -538,7 +582,7 @@ def co_locked(co):
     return saved_co_status(co) in (ChangeOrder.Status.SIGNED, ChangeOrder.Status.DECLINED)
 
 
-class ChangeOrderLineInline(admin.TabularInline):
+class ChangeOrderLineInline(TabularInline):
     model = ChangeOrderLine
     extra = 1
     fields = ("direction", "quote_line", "item", "description", "quantity", "unit_price", "restocking_percent", "amount_display")
@@ -577,8 +621,8 @@ class ChangeOrderLineInline(admin.TabularInline):
 
 
 @admin.register(ChangeOrder)
-class ChangeOrderAdmin(admin.ModelAdmin):
-    list_display = ("number", "quote", "status", "net_display", "billing", "created")
+class ChangeOrderAdmin(ModelAdmin):
+    list_display = ("number", "quote", "status_label", "net_display", "billing", "created")
     list_filter = ("status", "billing")
     search_fields = ("quote__site__customer__name", "quote__site__address", "reason")
     inlines = [ChangeOrderLineInline]
@@ -638,6 +682,10 @@ class ChangeOrderAdmin(admin.ModelAdmin):
             fields += [f for f in self.editable_fields if f not in fields]
         return fields
 
+    @display(description="Status", ordering="status", label={"requested": "info", "priced": "warning", "signed": "success", "declined": "danger"})
+    def status_label(self, obj):
+        return obj.status, obj.get_status_display()
+
     @admin.display(description="Net change")
     def net_display(self, obj):
         return signed_dollars(obj.net_price) if obj.pk else "-"
@@ -694,7 +742,7 @@ class ChangeOrderAdmin(admin.ModelAdmin):
 
 
 @admin.register(Notification)
-class NotificationAdmin(admin.ModelAdmin):
+class NotificationAdmin(ModelAdmin):
     list_display = ("message", "group", "quote", "created", "acknowledged_by")
     list_filter = ("acknowledged_at", "group")
     actions = ["acknowledge"]

@@ -1,29 +1,33 @@
 {% extends "admin/base_site.html" %}
-{% block breadcrumbs %}
-<div class="breadcrumbs">
-  <a href="{% url 'admin:index' %}">Home</a> &rsaquo;
-  <a href="{% url 'admin:crm_quote_changelist' %}">Quotes</a> &rsaquo; New lead
-</div>
-{% endblock %}
+{% block content_title %}{% endblock %}
 {% block content %}
-<p>This creates the customer, their first site and a draft quote in one step. Add line items on the next screen.</p>
-<form method="post">{% csrf_token %}
-  {% if form.non_field_errors %}<p class="errornote">{{ form.non_field_errors }}</p>{% endif %}
-  {% for title, fields in form.grouped %}
-  <fieldset class="module aligned">
-    <h2>{{ title }}</h2>
-    {% for field in fields %}
-    <div class="form-row{% if field.errors %} errors{% endif %}">
-      {{ field.errors }}
-      <div>
-        {{ field.label_tag }}
-        {{ field }}
-        {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+{% include "crm/_page_styles.html" %}
+<div class="ov">
+  <div>
+    <h1>New lead</h1>
+    <p class="sub intro">This creates the customer, their first site and a draft quote in one step. Add line items on the next screen.</p>
+  </div>
+  <form method="post">{% csrf_token %}
+    {% if form.non_field_errors %}<div class="formerror">{{ form.non_field_errors }}</div>{% endif %}
+    {% for title, fields in form.grouped %}
+    <div class="panel" style="margin-top:16px">
+      <h2>{{ title }}</h2>
+      <div class="group">
+        {% for field in fields %}
+        <div class="field{% if field.name == 'system_types' %} wide{% endif %}">
+          {{ field.errors }}
+          {{ field.label_tag }}
+          {{ field }}
+          {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+        </div>
+        {% endfor %}
       </div>
     </div>
     {% endfor %}
-  </fieldset>
-  {% endfor %}
-  <div class="submit-row"><input type="submit" value="Create lead" class="default"></div>
-</form>
+    <div class="actions-row" style="margin-top:16px">
+      <input type="submit" value="Create lead">
+      <a class="btn" href="{% url 'admin:crm_quote_changelist' %}">Cancel</a>
+    </div>
+  </form>
+</div>
 {% endblock %}

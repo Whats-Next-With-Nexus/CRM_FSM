@@ -26,6 +26,8 @@ class NewLeadForm(forms.Form):
     salesperson = forms.CharField(max_length=80, required=False)
     follow_up_on = forms.DateField(required=False, widget=forms.DateInput(attrs={"type": "date"}))
 
+    label_suffix = ""
+
     GROUPS = [
         ("Customer", ["customer_name", "contact_name", "phone", "email", "lead_source"]),
         ("Site", ["site_name", "address", "city", "state", "zip_code"]),

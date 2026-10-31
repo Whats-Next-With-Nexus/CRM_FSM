@@ -1,56 +1,64 @@
 {% extends "admin/base_site.html" %}
-{% block breadcrumbs %}
-<div class="breadcrumbs">
-  <a href="{% url 'admin:index' %}">Home</a> &rsaquo;
-  <a href="{% url 'admin:fsm_workorder_changelist' %}">Work orders</a> &rsaquo; Labor report
-</div>
-{% endblock %}
+{% block content_title %}{% endblock %}
 {% block content %}
-<p>
-  Estimated hours are the labor sold on the quote plus signed change orders. Actual hours are what technicians logged on the install.
-  The lead technician earns {{ percent|floatformat:"-2" }}% of the hours saved at ${{ rate|floatformat:"-2" }} an hour. Going over the estimate pays nothing and deducts nothing.
-  Bonuses count as earned once the install is complete.
-</p>
-<p>
-  {% if complete_only %}<a href="?">Show all installs</a>{% else %}<a href="?status=complete">Show completed installs only</a>{% endif %}
-</p>
+{% include "crm/_page_styles.html" %}
+<div class="ov">
+  <div class="head">
+    <div>
+      <h1>Install labor and bonus report</h1>
+      <p class="sub intro">
+        Estimated hours are the labor sold on the quote plus signed change orders. Actual hours are what technicians logged on the install.
+        The lead technician earns {{ percent|floatformat:"-2" }}% of the hours saved at ${{ rate|floatformat:"-2" }} an hour.
+        Going over the estimate pays nothing and deducts nothing. Bonuses count as earned once the install is complete.
+      </p>
+    </div>
+    <div class="actions-row">
+      {% if complete_only %}<a class="btn" href="?">Show all installs</a>{% else %}<a class="btn" href="?status=complete">Completed installs only</a>{% endif %}
+    </div>
+  </div>
 
-<div class="module">
-  <table>
-    <thead>
-      <tr><th>Work order</th><th>Site</th><th>Status</th><th>Lead technician</th><th>Estimated</th><th>Actual</th><th>Saved</th><th>Labor cost</th><th>Bonus</th></tr>
-    </thead>
-    <tbody>
-      {% for wo in rows %}
-      <tr>
-        <td><a href="{% url 'admin:fsm_workorder_change' wo.pk %}">{{ wo.number }}</a></td>
-        <td>{{ wo.site|default:"-" }}</td>
-        <td>{{ wo.get_status_display }}</td>
-        <td>{{ wo.lead_tech|default:"-" }}</td>
-        <td>{{ wo.estimated_hours|default_if_none:"-"|floatformat:"-2" }}</td>
-        <td>{{ wo.hours_logged|floatformat:"-2" }}</td>
-        <td>{{ wo.hours_saved|default_if_none:"-"|floatformat:"-2" }}</td>
-        <td>${{ wo.labor_cost|floatformat:"2g" }}</td>
-        <td>${{ wo.bonus|floatformat:"2g" }}{% if wo.bonus and not wo.bonus_earned %} <span class="help">(projected)</span>{% endif %}</td>
-      </tr>
-      {% empty %}
-      <tr><td colspan="9">No install work orders yet.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
+  <div class="stats">
+    <div class="stat"><small>Earned bonuses</small><b>${{ earned_total|floatformat:"2g" }}</b><span>installs marked Complete</span></div>
+    <div class="stat"><small>Installs listed</small><b>{{ rows|length }}</b></div>
+  </div>
 
-<div class="module">
-  <h2>Earned bonuses by lead technician</h2>
-  <table>
-    <tbody>
-      {% for lead, amount in by_lead %}
-      <tr><td>{{ lead }}</td><td>${{ amount|floatformat:"2g" }}</td></tr>
-      {% empty %}
-      <tr><td colspan="2">Nothing earned yet.</td></tr>
-      {% endfor %}
-      <tr><th>Total</th><th>${{ earned_total|floatformat:"2g" }}</th></tr>
-    </tbody>
-  </table>
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>Work order</th><th>Site</th><th>Status</th><th>Lead technician</th><th class="num">Estimated</th><th class="num">Actual</th><th class="num">Saved</th><th class="num">Labor cost</th><th class="num">Bonus</th></tr>
+      </thead>
+      <tbody>
+        {% for wo in rows %}
+        <tr>
+          <td><a href="{% url 'admin:fsm_workorder_change' wo.pk %}">{{ wo.number }}</a></td>
+          <td>{{ wo.site|default:"-" }}</td>
+          <td>{{ wo.get_status_display }}</td>
+          <td>{{ wo.lead_tech|default:"-" }}</td>
+          <td class="num">{{ wo.estimated_hours|default_if_none:"-"|floatformat:"-2" }}</td>
+          <td class="num">{{ wo.hours_logged|floatformat:"-2" }}</td>
+          <td class="num">{{ wo.hours_saved|default_if_none:"-"|floatformat:"-2" }}</td>
+          <td class="num">${{ wo.labor_cost|floatformat:"2g" }}</td>
+          <td class="num">${{ wo.bonus|floatformat:"2g" }}{% if wo.bonus and not wo.bonus_earned %} <span class="badge info">(projected)</span>{% endif %}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="9" class="muted">No install work orders yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Earned bonuses by lead technician</h2>
+    <table>
+      <tbody>
+        {% for lead, amount in by_lead %}
+        <tr><td>{{ lead }}</td><td class="num">${{ amount|floatformat:"2g" }}</td></tr>
+        {% empty %}
+        <tr><td colspan="2" class="muted">Nothing earned yet.</td></tr>
+        {% endfor %}
+        <tr><td><b>Total</b></td><td class="num"><b>${{ earned_total|floatformat:"2g" }}</b></td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endblock %}

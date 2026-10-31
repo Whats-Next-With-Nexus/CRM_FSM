@@ -507,7 +507,7 @@ class QuoteWorkflowTests(TestCase):
         self.as_role("Sales")
         self.assertEqual(self.client.get(reverse("admin:crm_quote_new_lead")).status_code, 200)
         page = self.client.get(reverse("admin:crm_quote_changelist")).content.decode()
-        self.assertIn(reverse("admin:crm_quote_new_lead"), page)
+        self.assertIn(reverse("admin:crm_quote_new_lead_action"), page)
 
     # the printable quote
 
@@ -975,7 +975,7 @@ class CustomerOverviewTests(TestCase):
     def test_the_summary_adds_up_signed_change_orders_into_the_contract_value(self):
         page = self.page("Sales")
         self.assertIn("$1,420", page)
-        self.assertIn("Open quotes ($400)", page)
+        self.assertIn("$400 pending", page)
         self.assertIn("$1,020.00", page)
         self.assertIn("was $800.00", page)
 
@@ -1020,5 +1020,27 @@ class CustomerOverviewTests(TestCase):
         self.as_role("Operations Manager")
         overview = reverse("admin:crm_customer_overview", args=[self.customer.pk])
         self.assertIn(overview, self.client.get(reverse("admin:crm_customer_changelist")).content.decode())
-        self.assertIn(overview, self.client.get(reverse("admin:crm_customer_change", args=[self.customer.pk])).content.decode())
-        self.assertIn(overview, self.client.get(reverse("admin:crm_quote_change", args=[self.won.pk])).content.decode())
+        customer_page = self.client.get(reverse("admin:crm_customer_change", args=[self.customer.pk])).content.decode()
+        self.assertIn(reverse("admin:crm_customer_overview_action", args=[self.customer.pk]), customer_page)
+        quote_page = self.client.get(reverse("admin:crm_quote_change", args=[self.won.pk])).content.decode()
+        self.assertIn(reverse("admin:crm_quote_customer_overview_action", args=[self.won.pk]), quote_page)
+        self.assertIn(reverse("admin:crm_quote_printable_action", args=[self.won.pk]), quote_page)
+
+    def test_the_header_buttons_land_on_the_right_pages(self):
+        self.as_role("Operations Manager")
+        response = self.client.get(reverse("admin:crm_customer_overview_action", args=[self.customer.pk]))
+        self.assertRedirects(response, reverse("admin:crm_customer_overview", args=[self.customer.pk]), fetch_redirect_response=False)
+        response = self.client.get(reverse("admin:crm_quote_customer_overview_action", args=[self.won.pk]))
+        self.assertRedirects(response, reverse("admin:crm_customer_overview", args=[self.customer.pk]), fetch_redirect_response=False)
+        response = self.client.get(reverse("admin:crm_quote_printable_action", args=[self.won.pk]))
+        self.assertRedirects(response, reverse("admin:crm_quote_document", args=[self.won.pk]), fetch_redirect_response=False)
+        response = self.client.get(reverse("admin:fsm_workorder_labor_report_action"))
+        self.assertRedirects(response, reverse("admin:fsm_workorder_labor_report"), fetch_redirect_response=False)
+
+    def test_header_buttons_respect_permissions(self):
+        self.as_role("Technician")
+        self.assertEqual(self.client.get(reverse("admin:fsm_workorder_labor_report_action")).status_code, 403)
+        self.assertEqual(self.client.get(reverse("admin:crm_quote_new_lead_action")).status_code, 403)
+        self.as_role("Sales")
+        response = self.client.get(reverse("admin:crm_quote_new_lead_action"))
+        self.assertRedirects(response, reverse("admin:crm_quote_new_lead"), fetch_redirect_response=False)
