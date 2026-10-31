@@ -32,7 +32,10 @@ class WorkOrderAdmin(ModelAdmin):
     def status_label(self, obj):
         return obj.status, obj.get_status_display()
 
-    @action(description="Labor and bonus report", icon="payments", permissions=["fsm.view_labor_bonus"])
+    def has_labor_report_permission(self, request):
+        return request.user.has_perm("fsm.view_labor_bonus")
+
+    @action(description="Labor and bonus report", icon="payments", permissions=["labor_report"])
     def labor_report_action(self, request):
         return redirect("admin:fsm_workorder_labor_report")
     list_filter = ("wo_type", "internal_category", "status", "billing")

@@ -1,8 +1,9 @@
+import re
 from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.test import TestCase
@@ -222,6 +223,7 @@ class QuoteWorkflowTests(TestCase):
         cls.site = Site.objects.create(customer=customer, address="1 Main St")
         cls.switch = CatalogItem.objects.create(sku="SW", name="PoE Switch", unit_cost=100, list_price=180, min_price=150)
         cls.cctv = SystemType.objects.create(name="Test CCTV")
+        cls.rep = User.objects.create_user("rep1", password="pw", is_staff=True)
 
     def as_role(self, role):
         user = User.objects.create_user(username=role.replace(" ", "").lower(), password="pw", is_staff=True)
@@ -475,7 +477,7 @@ class QuoteWorkflowTests(TestCase):
         data = {
             "customer_name": "Fresh Lead LLC", "contact_name": "Sam Lee", "phone": "555-0100", "email": "sam@example.com",
             "lead_source": "referral", "site_name": "HQ", "address": "9 Oak Ave", "city": "Carmel", "state": "in",
-            "zip_code": "46032", "system_types": [self.cctv.pk], "salesperson": "Dakota", "follow_up_on": "",
+            "zip_code": "46032", "system_types": [self.cctv.pk], "salesperson": self.rep.pk, "follow_up_on": "",
         }
         data.update(overrides)
         return data
@@ -487,7 +489,7 @@ class QuoteWorkflowTests(TestCase):
         self.assertRedirects(response, self.url(quote))
         customer = quote.customer
         self.assertEqual((customer.status, customer.lead_source, customer.name), (Customer.Status.LEAD, "referral", "Fresh Lead LLC"))
-        self.assertEqual((quote.stage, quote.site.state, quote.salesperson), (Stage.NEW_LEAD, "IN", "Dakota"))
+        self.assertEqual((quote.stage, quote.site.state, quote.salesperson), (Stage.NEW_LEAD, "IN", self.rep))
         self.assertEqual(list(quote.system_types.all()), [self.cctv])
 
     def test_new_lead_needs_a_service_and_blocks_a_duplicate_site(self):
@@ -1044,3 +1046,309 @@ class CustomerOverviewTests(TestCase):
         self.as_role("Sales")
         response = self.client.get(reverse("admin:crm_quote_new_lead_action"))
         self.assertRedirects(response, reverse("admin:crm_quote_new_lead"), fetch_redirect_response=False)
+
+
+class DashboardTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command("setup_roles")
+        today = timezone.localdate()
+        cls.today = today
+        prime = Contractor.objects.create(name="Northgate")
+        customer = Customer.objects.create(name="Dash Co", contracted_through=prime)
+        cls.site = Site.objects.create(customer=customer, name="HQ", address="1 Main St", access_notes="Gate code 4411")
+        cls.item = CatalogItem.objects.create(sku="SW", name="Switch", unit_cost=100, list_price=400, min_price=320)
+        cls.labor = CatalogItem.objects.create(
+            sku="LAB", name="Labor", kind=CatalogItem.Kind.LABOR, unit_cost=45, list_price=95, min_price=80,
+        )
+        cls.skill = Skill.objects.create(name="Cabling")
+
+        cls.rep = cls.person("rep", "Sales")
+        cls.other_rep = cls.person("otherrep", "Sales")
+        cls.sales_manager = cls.person("salesmanager", "Sales Manager")
+        cls.install = cls.person("installmgr", "Install Manager")
+        cls.ops = cls.person("opsmgr", "Operations Manager")
+        cls.tech = cls.person("tech", "Technician", tech=True)
+        cls.other_tech = cls.person("othertech", "Technician", tech=True)
+
+        day = timedelta(days=1)
+        cls.a = cls.quote(cls.rep, Stage.NEW_LEAD, follow=today - day)
+        cls.b = cls.quote(cls.rep, Stage.QUOTE_SENT, follow=today + 3 * day)
+        cls.c = cls.quote(cls.rep, Stage.QUOTE_SENT, valid=today + 2 * day)
+        cls.d = cls.quote(cls.rep, Stage.DEPOSIT, ops_status=Quote.OpsStatus.REFUSED, sent_on=timezone.now())
+        cls.e = cls.quote(cls.other_rep, Stage.QUOTE_SENT, follow=today - 2 * day)
+
+    @classmethod
+    def person(cls, username, role, tech=False):
+        user = User.objects.create_user(username=username, password="pw", is_staff=True)
+        user.groups.add(Group.objects.get(name=role))
+        if tech:
+            TechProfile.objects.create(user=user).skills.add(cls.skill)
+        return user
+
+    @classmethod
+    def quote(cls, rep, stage, follow=None, valid=None, price=None, **fields):
+        quote = Quote.objects.create(site=cls.site, salesperson=rep, stage=stage, follow_up_on=follow, valid_until=valid, **fields)
+        QuoteLine.objects.create(quote=quote, item=cls.item, quantity=1, unit_price=price)
+        return quote
+
+    def page(self, user):
+        self.client.force_login(user)
+        response = self.client.get(reverse("admin:index"))
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def tile(self, page, label):
+        match = re.search(rf"<small>{re.escape(label)}</small>\s*<b>(.*?)</b>\s*(?:<span>(.*?)</span>)?", page, re.S)
+        self.assertIsNotNone(match, f"no tile called {label}")
+        return match.group(1).strip(), (match.group(2) or "").strip()
+
+    def tile_href(self, page, label):
+        match = re.search(rf'<a class="tile[^"]*" href="([^"]*)">\s*<small>{re.escape(label)}</small>', page)
+        self.assertIsNotNone(match, f"no tile called {label}")
+        return match.group(1)
+
+    # sales
+
+    def test_a_rep_sees_only_their_own_quotes_and_a_manager_sees_everyone(self):
+        page = self.page(self.rep)
+        self.assertEqual(self.tile(page, "Open quotes"), ("3", "$1,200 pending"))
+        self.assertEqual(self.tile(page, "Follow-ups overdue")[0], "1")
+        self.assertIn("My quotes and follow-ups", page)
+        page = self.page(self.sales_manager)
+        self.assertEqual(self.tile(page, "Open quotes"), ("4", "$1,600 pending"))
+        self.assertEqual(self.tile(page, "Follow-ups overdue")[0], "2")
+        self.assertNotIn("My quotes and follow-ups", page)
+
+    def test_tile_links_carry_the_rep_filter_only_for_reps(self):
+        self.assertIn(f"salesperson__id__exact={self.rep.pk}", self.tile_href(self.page(self.rep), "Follow-ups overdue"))
+        self.assertNotIn("salesperson__id", self.tile_href(self.page(self.sales_manager), "Follow-ups overdue"))
+        self.assertIn("follow_up=overdue", self.tile_href(self.page(self.rep), "Follow-ups overdue"))
+
+    def test_due_returned_and_expiring_tiles(self):
+        page = self.page(self.rep)
+        self.assertEqual(self.tile(page, "Due this week")[0], "1")
+        self.assertEqual(self.tile(page, "Returned by Ops")[0], "1")
+        self.assertEqual(self.tile(page, "Expiring soon")[0], "1")
+        self.assertIn("ops_status__exact=refused", self.tile_href(page, "Returned by Ops"))
+
+    def test_the_follow_up_table_is_ordered_by_date_and_names_the_customer(self):
+        page = self.page(self.rep)
+        self.assertIn("Next follow-ups", page)
+        self.assertIn("Dash Co", page)
+        self.assertLess(page.index(self.a.number), page.index(self.b.number))
+        self.assertNotIn(self.e.number, page)
+
+    def test_only_sales_manager_level_users_see_performance(self):
+        Quote.objects.filter(pk=self.a.pk).update(created=timezone.now() - timedelta(days=100), stage=Stage.LOST)
+        self.quote(self.rep, Stage.APPROVED)
+        self.quote(self.rep, Stage.LOST, lost_reason="price")
+        page = self.page(self.sales_manager)
+        # won: deposit and approved; lost within 90 days: one (the other lost quote is older)
+        self.assertEqual(self.tile(page, "Win rate, last 90 days"), ("67%", "2 won, 1 lost"))
+        self.assertIn("Pipeline value by stage", page)
+        self.assertIn("Price too high", page)
+        self.assertIn("Average margin, open quotes", page)
+        self.assertNotIn("Pipeline value by stage", self.page(self.rep))
+        self.assertNotIn("Win rate", self.page(self.rep))
+
+    def test_needs_approval_counts_quotes_held_for_pricing_or_deposit(self):
+        held = self.quote(self.rep, Stage.NEW_LEAD, price=300)
+        low_deposit = self.quote(self.rep, Stage.NEW_LEAD)
+        Quote.objects.filter(pk=low_deposit.pk).update(deposit_percent=Decimal("25"))
+        self.assertEqual(self.tile(self.page(self.sales_manager), "Needs your approval")[0], "2")
+        self.assertEqual(self.tile(self.page(self.install), "Needs your approval")[0], "2")
+        held.refresh_from_db()
+        held.exceptions_approved = True
+        held.exceptions_signature = held.current_signature()
+        held.save()
+        self.assertEqual(self.tile(self.page(self.sales_manager), "Needs your approval")[0], "1")
+        self.assertNotIn("Needs your approval", self.page(self.rep))
+
+    # operations
+
+    def make_install(self, hours, estimated=10, lead=None, status=WorkOrder.Status.IN_PROGRESS):
+        quote = Quote.objects.create(site=self.site, stage=Stage.SENT_TO_OPS, ops_status=Quote.OpsStatus.ACCEPTED)
+        QuoteLine.objects.create(quote=quote, item=self.labor, quantity=estimated)
+        work_order = WorkOrder.objects.create(wo_type="install", site=self.site, quote=quote, status=status, lead_tech=lead)
+        if hours:
+            assignment = VisitAssignment.objects.create(
+                visit=Visit.objects.create(work_order=work_order, scheduled_for=self.today), tech=self.tech, skill=self.skill,
+            )
+            assignment.start()
+            assignment.started_at = timezone.now() - timedelta(hours=hours)
+            assignment.save()
+            assignment.stop()
+        return work_order
+
+    def test_the_install_manager_sees_operations_tiles_but_no_sales_block(self):
+        self.make_install(hours=12, lead=self.tech)
+        self.make_install(hours=2, lead=None)
+        Quote.objects.filter(pk=self.b.pk).update(ops_status=Quote.OpsStatus.PENDING)
+        page = self.page(self.install)
+        self.assertEqual(self.tile(page, "Waiting on Ops")[0], "1")
+        self.assertEqual(self.tile(page, "Installs in progress"), ("2", "1 over estimate"))
+        self.assertEqual(self.tile(page, "Installs with no lead")[0], "1")
+        self.assertNotIn("My quotes and follow-ups", page)
+        self.assertNotIn("Next follow-ups", page)
+        self.assertNotIn("Subcontract work open", page)
+
+    def test_visits_and_unassigned_visits_this_week(self):
+        work_order = self.make_install(hours=0)
+        assigned = Visit.objects.create(work_order=work_order, scheduled_for=self.today + timedelta(days=2))
+        VisitAssignment.objects.create(visit=assigned, tech=self.tech, skill=self.skill)
+        Visit.objects.create(work_order=work_order, scheduled_for=self.today)
+        Visit.objects.create(work_order=work_order, scheduled_for=self.today + timedelta(days=30))
+        page = self.page(self.install)
+        self.assertEqual(self.tile(page, "Visits, next 7 days"), ("2", "1 with no technician"))
+        self.assertIn("Today&#x27;s visits", page.replace("'", "&#x27;"))
+        self.assertIn("No technician yet", page)
+
+    def test_open_change_orders_and_unread_alerts(self):
+        quote = self.quote(self.rep, Stage.SENT_TO_OPS)
+        ChangeOrder.objects.create(quote=quote, reason="x", status="requested")
+        ChangeOrder.objects.create(quote=quote, reason="y", status="priced")
+        ChangeOrder.objects.create(quote=quote, reason="z", status="signed", signed_by="Pat")
+        notify(["Install Manager"], "one")
+        notify(["Install Manager"], "two")
+        notify(["Sales"], "not for installers")
+        page = self.page(self.install)
+        self.assertEqual(self.tile(page, "Change orders open")[0], "2")
+        self.assertEqual(self.tile(page, "Unread alerts")[0], "2")
+
+    def test_the_operations_manager_also_sees_subcontract_service_and_bonus(self):
+        WorkOrder.objects.create(wo_type="subcontract", site=self.site)
+        WorkOrder.objects.create(wo_type="subcontract", site=self.site, status=WorkOrder.Status.COMPLETE)
+        WorkOrder.objects.create(wo_type="service", site=self.site, billing="billable")
+        WorkOrder.objects.create(wo_type="service", site=self.site, billing="warranty")
+        done = self.make_install(hours=6, estimated=10, lead=self.tech, status=WorkOrder.Status.COMPLETE)
+        page = self.page(self.ops)
+        self.assertEqual(self.tile(page, "Subcontract work open"), ("1", "Northgate 1"))
+        value, sub = self.tile(page, "Service calls open")
+        self.assertEqual(value, "2")
+        self.assertIn("billable", sub)
+        self.assertIn("warranty", sub)
+        self.assertEqual(self.tile(page, "Labor bonus earned")[0], f"${done.bonus:,.0f}")
+
+    # technicians
+
+    def make_job(self, tech, day, status="open"):
+        work_order = WorkOrder.objects.create(wo_type="install", site=self.site, description="Pull cable to the east wing")
+        return VisitAssignment.objects.create(
+            visit=Visit.objects.create(work_order=work_order, scheduled_for=day), tech=tech, skill=self.skill,
+        )
+
+    def test_a_technician_sees_their_jobs_with_access_notes_and_no_money(self):
+        mine = self.make_job(self.tech, self.today)
+        theirs = self.make_job(self.other_tech, self.today)
+        self.make_job(self.tech, self.today + timedelta(days=3))
+        page = self.page(self.tech)
+        self.assertIn("My jobs", page)
+        self.assertIn("Gate code 4411", page)
+        self.assertIn("Pull cable to the east wing", page)
+        self.assertIn(reverse("dashboard_assignment", args=[mine.pk, "start"]), page)
+        self.assertNotIn(reverse("dashboard_assignment", args=[theirs.pk, "start"]), page)
+        self.assertIn("Next 7 days", page)
+        self.assertNotIn("Open quotes", page)
+        self.assertIsNone(re.search(r"\$\d", page.split("My jobs")[1]))
+
+    def test_the_buttons_start_and_stop_a_job_and_show_a_running_card(self):
+        job = self.make_job(self.tech, self.today)
+        self.client.force_login(self.tech)
+        response = self.client.post(reverse("dashboard_assignment", args=[job.pk, "start"]), follow=True)
+        job.refresh_from_db()
+        self.assertIsNotNone(job.started_at)
+        self.assertContains(response, "Job started")
+        self.assertContains(response, "Stop job")
+        self.assertContains(response, reverse("dashboard_assignment", args=[job.pk, "stop"]))
+        self.client.post(reverse("dashboard_assignment", args=[job.pk, "stop"]))
+        job.refresh_from_db()
+        self.assertIsNotNone(job.ended_at)
+
+    def test_hours_this_week_come_from_finished_jobs(self):
+        job = self.make_job(self.tech, self.today)
+        job.start()
+        job.started_at = timezone.now() - timedelta(hours=3)
+        job.save()
+        job.stop()
+        page = self.page(self.tech)
+        self.assertIn("Hours this week", page)
+        self.assertRegex(page, r"<small>Hours this week</small>\s*<b>3</b>")
+
+    def test_the_buttons_are_post_only_and_respect_ownership(self):
+        job = self.make_job(self.tech, self.today)
+        url = reverse("dashboard_assignment", args=[job.pk, "start"])
+        self.client.force_login(self.tech)
+        self.assertEqual(self.client.get(url).status_code, 405)
+        self.client.force_login(self.other_tech)
+        self.assertEqual(self.client.post(url).status_code, 403)
+        job.refresh_from_db()
+        self.assertIsNone(job.started_at)
+        self.client.force_login(self.install)
+        self.client.post(url)
+        job.refresh_from_db()
+        self.assertIsNotNone(job.started_at)
+        self.client.force_login(self.tech)
+        self.assertEqual(self.client.post(reverse("dashboard_assignment", args=[job.pk, "bogus"])).status_code, 404)
+
+    def test_anonymous_visitors_are_sent_to_login(self):
+        job = self.make_job(self.tech, self.today)
+        response = self.client.post(reverse("dashboard_assignment", args=[job.pk, "start"]))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("login", response["Location"])
+
+    # everyone else
+
+    def test_someone_with_no_dashboard_role_gets_the_plain_app_list(self):
+        viewer = User.objects.create_user("viewer", password="pw", is_staff=True)
+        viewer.user_permissions.add(Permission.objects.get(codename="view_customer"))
+        page = self.page(viewer)
+        self.assertNotIn("Welcome,", page)
+        self.assertIn("Customers", page)
+
+    def test_a_superuser_sees_sales_and_operations_but_not_the_technician_block(self):
+        boss = User.objects.create_superuser("boss", "b@example.com", "pw")
+        page = self.page(boss)
+        self.assertIn("Quotes and follow-ups", page)
+        self.assertIn("Pipeline value by stage", page)
+        self.assertIn("Waiting on Ops", page)
+        self.assertNotIn("My jobs", page)
+
+
+class StartupSafetyTests(TestCase):
+    def test_admin_actions_never_name_permissions_with_a_dot(self):
+        """A dotted permission makes Unfold's startup check query the database, which breaks migrate on a new one."""
+        from django.contrib import admin as django_admin
+
+        offenders = []
+        for model, model_admin in django_admin.site._registry.items():
+            if not hasattr(model_admin, "_get_base_actions_list"):
+                continue
+            actions = [
+                *model_admin._get_base_actions_list(), *model_admin._get_base_actions_detail(),
+                *model_admin._get_base_actions_row(), *model_admin._get_base_actions_submit_line(),
+            ]
+            for item in actions:
+                for permission in getattr(item.method, "allowed_permissions", []):
+                    if "." in permission:
+                        offenders.append(f"{type(model_admin).__name__}.{item.method.original_function_name}: {permission}")
+        self.assertEqual(offenders, [])
+
+    def test_every_action_permission_method_exists(self):
+        from django.contrib import admin as django_admin
+
+        for model, model_admin in django_admin.site._registry.items():
+            if not hasattr(model_admin, "_get_base_actions_list"):
+                continue
+            for item in [*model_admin._get_base_actions_list(), *model_admin._get_base_actions_detail()]:
+                for permission in getattr(item.method, "allowed_permissions", []):
+                    self.assertTrue(
+                        hasattr(model_admin, f"has_{permission}_permission"),
+                        f"{type(model_admin).__name__} is missing has_{permission}_permission",
+                    )
+
+
+class SiteRootTests(TestCase):
+    def test_the_site_root_sends_people_to_the_dashboard(self):
+        response = self.client.get("/")
+        self.assertRedirects(response, reverse("admin:index"), fetch_redirect_response=False)

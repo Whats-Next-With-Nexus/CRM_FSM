@@ -62,4 +62,33 @@
   .ov form [id=id_system_types] label { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; margin: 0; }
   .ov .formerror { background: var(--ov-bad-bg); color: var(--ov-bad-fg); border-radius: 8px; padding: 10px 14px; }
   .ov .actions-row { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+
+  .ov h3.section { margin: 0 0 8px; }
+  .ov .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .ov a.tile {
+    display: block; border: 1px solid var(--ov-line); border-left: 4px solid var(--ov-line); border-radius: 10px;
+    padding: 12px 16px; background: var(--ov-card); color: var(--ov-text); text-decoration: none;
+  }
+  .ov a.tile:hover { border-color: var(--ov-accent); text-decoration: none; }
+  .ov a.tile.warn { border-left-color: #f59e0b; }
+  .ov a.tile.bad { border-left-color: #ef4444; }
+  .ov a.tile.ok { border-left-color: #22c55e; }
+  .ov a.tile small { display: block; color: var(--ov-muted); font-size: 12px; }
+  .ov a.tile b { display: block; font-size: 28px; line-height: 1.2; font-weight: 700; margin: 2px 0; }
+  .ov a.tile.warn b { color: var(--ov-warn-fg); }
+  .ov a.tile.bad b { color: var(--ov-bad-fg); }
+  .ov a.tile span { color: var(--ov-muted); font-size: 12px; }
+  .ov .lvl.bad { color: var(--ov-bad-fg); font-weight: 600; }
+  .ov .lvl.warn { color: var(--ov-warn-fg); font-weight: 600; }
+  .ov .bars { display: grid; gap: 10px; margin-top: 12px; }
+  .ov .bar-row { display: grid; grid-template-columns: minmax(150px, 220px) 1fr 90px; gap: 12px; align-items: center; }
+  .ov .bar { height: 10px; border-radius: 999px; background: var(--ov-soft); border: 1px solid var(--ov-line); overflow: hidden; }
+  .ov .bar i { display: block; height: 100%; background: var(--color-primary-500); border-radius: 999px; }
+  .ov .bar i.bad { background: #ef4444; }
+  .ov .bar-row .num { text-align: right; }
+  .ov .job { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--ov-line); }
+  .ov .job:last-child { border-bottom: 0; }
+  .ov .job.running { border: 1px solid #f59e0b; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; background: var(--ov-warn-bg); }
+  .ov .job form { margin: 0; }
+  .ov button.btn { font-family: inherit; }
 </style>

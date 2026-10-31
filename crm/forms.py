@@ -1,4 +1,5 @@
 from django import forms
+from django.contrib.auth import get_user_model
 from django.db import transaction
 
 from .models import Customer, Quote, Site, SystemType
@@ -23,7 +24,9 @@ class NewLeadForm(forms.Form):
         queryset=SystemType.objects.filter(active=True), widget=forms.CheckboxSelectMultiple,
         label="Services wanted", error_messages={"required": "Pick at least one service."},
     )
-    salesperson = forms.CharField(max_length=80, required=False)
+    salesperson = forms.ModelChoiceField(
+        queryset=get_user_model().objects.filter(is_staff=True, is_active=True).order_by("username"), required=False,
+    )
     follow_up_on = forms.DateField(required=False, widget=forms.DateInput(attrs={"type": "date"}))
 
     label_suffix = ""

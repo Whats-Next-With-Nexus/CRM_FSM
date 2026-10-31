@@ -237,7 +237,10 @@ class Quote(models.Model):
         validators=[MinValueValidator(0), MaxValueValidator(100)],
         help_text="Standard is 50%. Anything lower needs manager approval.",
     )
-    salesperson = models.CharField(max_length=80, blank=True)
+    salesperson = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="quotes_sold",
+        limit_choices_to={"is_staff": True, "is_active": True}, help_text="Defaults to whoever creates the quote.",
+    )
     notes = models.TextField(blank=True)
     created = models.DateTimeField(auto_now_add=True)
     follow_up_on = models.DateField(null=True, blank=True, help_text="Next time to reach out to the customer.")
@@ -283,6 +286,10 @@ class Quote(models.Model):
     @property
     def customer(self):
         return self.site.customer
+
+    @property
+    def salesperson_name(self):
+        return (self.salesperson.get_full_name() or self.salesperson.get_username()) if self.salesperson_id else ""
 
     @property
     def number(self):

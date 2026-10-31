@@ -88,6 +88,7 @@ UNFOLD = {
             "950": "oklch(28.2% .091 267.935)",
         },
     },
+    "DASHBOARD_CALLBACK": "crm.dashboard.dashboard_callback",
     "COMMAND": {"search_models": True},
     "SIDEBAR": {
         "show_search": True,
@@ -171,7 +172,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [

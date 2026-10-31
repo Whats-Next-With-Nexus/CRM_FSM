@@ -87,8 +87,9 @@ class Command(BaseCommand):
             contact_name="Pat Morgan", phone="317-555-0142", email="pat@example.com",
         )
         building = Site.objects.create(customer=lead, name="Building 8", address="500 Commerce Dr", city="Indianapolis", state="IN")
+        rep, _ = User.objects.get_or_create(username="sales", defaults={"email": "sales@example.com", "is_staff": True})
         quote = Quote.objects.create(
-            site=building, stage=Quote.Stage.QUOTE_SENT, salesperson="Dakota",
+            site=building, stage=Quote.Stage.QUOTE_SENT, salesperson=rep,
             follow_up_on=timezone.localdate() + timedelta(days=3),
         )
         quote.system_types.add(types["CCTV"])
@@ -103,8 +104,11 @@ class Command(BaseCommand):
 
         # An accepted install with a technician assigned. Starting the job lets you try a revision cutoff and a change order.
         church = Customer.objects.create(name="Cedar Ridge Church", status=Customer.Status.CUSTOMER, contact_name="Jordan Reyes")
-        hall = Site.objects.create(customer=church, name="Fellowship hall", address="720 Cedar Ridge Rd", city="Greenwood", state="IN")
-        install_quote = Quote.objects.create(site=hall, stage=Quote.Stage.QUOTE_SENT, salesperson="Dakota")
+        hall = Site.objects.create(
+            customer=church, name="Fellowship hall", address="720 Cedar Ridge Rd", city="Greenwood", state="IN",
+            access_notes="Side door by the parking lot. Ask for Jordan; a badge is needed after 4 pm.",
+        )
+        install_quote = Quote.objects.create(site=hall, stage=Quote.Stage.QUOTE_SENT, salesperson=rep)
         install_quote.system_types.add(types["CCTV"])
         for sku, qty in [("CAM-DOME-4MP", 3), ("SW-POE-8", 1), ("LAB-TECH", 16)]:
             QuoteLine.objects.create(quote=install_quote, item=items[sku], quantity=qty, system_type=types["CCTV"])
@@ -117,6 +121,25 @@ class Command(BaseCommand):
         install_wo = install_quote.ensure_install_work_order()
         install_wo.status = WorkOrder.Status.SCHEDULED
         install_wo.save(update_fields=["status"])
+
+        WorkOrder.objects.create(
+            wo_type=WorkOrder.Type.SUBCONTRACT, site=Site.objects.filter(customer=bank).first(),
+            description="Add two cameras at the drive-up lane, assigned by the contractor.",
+        )
+
+        # More pipeline so the dashboard has something to show: an overdue lead held for approval, and a lost quote.
+        marina = Customer.objects.create(name="Harbor View Marina", status=Customer.Status.LEAD, lead_source=Customer.LeadSource.WEBSITE)
+        dock = Site.objects.create(customer=marina, name="Main dock", address="14 Lakeshore Dr", city="Noblesville", state="IN")
+        held = Quote.objects.create(site=dock, salesperson=rep, follow_up_on=timezone.localdate() - timedelta(days=1))
+        held.system_types.add(types["CCTV"])
+        QuoteLine.objects.create(quote=held, item=items["CAM-DOME-4MP"], quantity=6, unit_price=140, system_type=types["CCTV"])
+        QuoteLine.objects.create(quote=held, item=items["LAB-TECH"], quantity=12, system_type=types["CCTV"])
+        daycare = Customer.objects.create(name="Maple Ridge Daycare", status=Customer.Status.LEAD)
+        room = Site.objects.create(customer=daycare, name="Main building", address="9 Maple Ridge Ln", city="Fishers", state="IN")
+        lost = Quote.objects.create(site=room, salesperson=rep, stage=Quote.Stage.QUOTE_SENT, lost_reason=Quote.LostReason.COMPETITOR)
+        QuoteLine.objects.create(quote=lost, item=items["NVR-16"], quantity=1, system_type=types["CCTV"])
+        lost.stage = Quote.Stage.LOST
+        lost.save()
 
         tech, _ = User.objects.get_or_create(username="tech", defaults={"email": "tech@example.com", "is_staff": True})
         TechProfile.objects.get_or_create(user=tech)[0].skills.set(Skill.objects.all())

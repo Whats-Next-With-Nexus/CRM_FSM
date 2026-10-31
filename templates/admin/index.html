@@ -1,0 +1,134 @@
+{% extends 'admin/base.html' %}
+
+{% load i18n %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+    {% include "unfold/helpers/site_branding.html" %}
+{% endblock %}
+
+{% block content %}
+{% if dash.blocks %}
+{% include "crm/_page_styles.html" %}
+<div class="ov">
+  <div>
+    <h1>Welcome, {{ dash.name }}</h1>
+    <p class="sub">{{ dash.today|date:"l, F j" }}</p>
+  </div>
+
+  {% for block in dash.blocks %}
+    {% if block.kind == "tiles" %}
+    <div>
+      <h3 class="section">{{ block.title }}</h3>
+      <div class="tiles">
+        {% for tile in block.tiles %}
+        <a class="tile {{ tile.level }}" href="{{ tile.url|default:'#' }}">
+          <small>{{ tile.label }}</small>
+          <b>{{ tile.value }}</b>
+          {% if tile.sub %}<span>{{ tile.sub }}</span>{% endif %}
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% elif block.kind == "table" %}
+    <div class="panel">
+      <div class="site-head">
+        <h2>{{ block.title }}</h2>
+        {% if block.link %}<a href="{{ block.link.1 }}">{{ block.link.0 }} &rarr;</a>{% endif %}
+      </div>
+      {% if block.rows %}
+      <table style="margin-top:8px">
+        <thead><tr>{% for column in block.columns %}<th{% if forloop.counter0 in block.num_columns %} class="num"{% endif %}>{{ column }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for row in block.rows %}
+          <tr>
+            {% for cell in row %}
+            <td{% if cell.num %} class="num"{% endif %}>
+              {% if cell.url %}<a href="{{ cell.url }}">{{ cell.text }}</a>{% elif cell.level %}<span class="lvl {{ cell.level }}">{{ cell.text }}</span>{% else %}{{ cell.text }}{% endif %}
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}<p class="muted" style="margin-top:8px">{{ block.empty }}</p>{% endif %}
+    </div>
+
+    {% elif block.kind == "bars" %}
+    <div class="panel">
+      <h2>{{ block.title }}</h2>
+      {% if block.items %}
+      <div class="bars">
+        {% for item in block.items %}
+        <div class="bar-row">
+          <span>{{ item.label }}</span>
+          <div class="bar"><i class="{{ item.level }}" style="width: {{ item.pct }}%"></i></div>
+          <span class="num">{{ item.value_text }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}<p class="muted">{{ block.empty }}</p>{% endif %}
+    </div>
+
+    {% elif block.kind == "jobs" %}
+    <div>
+      <h3 class="section">{{ block.title }}</h3>
+      {% if block.running %}
+        {% for job in block.running %}
+        <div class="job running">
+          <div>
+            <b>{{ job.site }}</b> <span class="badge warn">Running</span>
+            <div class="muted">{{ job.address }} &middot; {{ job.skill }}</div>
+            {% if job.access %}<div class="note"><b>Access:</b> {{ job.access }}</div>{% endif %}
+          </div>
+          <form method="post" action="{% url 'dashboard_assignment' job.pk 'stop' %}">{% csrf_token %}<button class="btn primary" type="submit">Stop job</button></form>
+        </div>
+        {% endfor %}
+      {% endif %}
+
+      <div class="stats" style="margin: 12px 0">
+        <div class="stat"><small>Running now</small><b>{{ block.running|length }}</b></div>
+        <div class="stat"><small>Jobs today</small><b>{{ block.today|length }}</b></div>
+        <div class="stat"><small>Hours this week</small><b>{{ block.hours|default:"0" }}</b></div>
+      </div>
+
+      <div class="panel">
+        <h2>Today</h2>
+        {% for job in block.today %}
+        <div class="job">
+          <div>
+            <b>{{ job.site }}</b> {% if job.state == "done" %}<span class="badge ok">Done</span>{% endif %}
+            <div class="muted">{{ job.address }} &middot; {{ job.skill }}</div>
+            {% if job.description %}<div class="muted">{{ job.description }}</div>{% endif %}
+            {% if job.access %}<div class="note"><b>Access:</b> {{ job.access }}</div>{% endif %}
+          </div>
+          {% if job.state == "ready" %}
+          <form method="post" action="{% url 'dashboard_assignment' job.pk 'start' %}">{% csrf_token %}<button class="btn primary" type="submit">Start job</button></form>
+          {% endif %}
+        </div>
+        {% empty %}
+        <p class="muted">{% if block.running %}Your running job is above.{% else %}No jobs scheduled for today.{% endif %}</p>
+        {% endfor %}
+      </div>
+
+      {% if block.later %}
+      <div class="panel" style="margin-top:12px">
+        <h2>Next 7 days</h2>
+        <table style="margin-top:8px">
+          <thead><tr><th>Date</th><th>Site</th><th>Skill</th></tr></thead>
+          <tbody>
+            {% for day, job in block.later %}<tr><td>{{ day|date:"D, M j" }}</td><td>{{ job.site }}<div class="muted">{{ job.address }}</div></td><td>{{ job.skill }}</td></tr>{% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% else %}
+  {% include "unfold/helpers/dashboard_default.html" %}
+{% endif %}
+{% endblock %}

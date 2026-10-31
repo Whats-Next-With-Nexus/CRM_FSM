@@ -109,7 +109,10 @@ class CustomerAdmin(ContractInfoMixin, ModelAdmin):
     def status_label(self, obj):
         return obj.status, obj.get_status_display()
 
-    @action(description="Overview", icon="dashboard", permissions=["crm.view_customer"])
+    def has_overview_permission(self, request, object_id=None):
+        return request.user.has_perm("crm.view_customer")
+
+    @action(description="Overview", icon="dashboard", permissions=["overview"])
     def overview_action(self, request, object_id):
         return redirect("admin:crm_customer_overview", object_id)
 
@@ -240,7 +243,7 @@ def quote_document_data(quote, revision=None):
         ]
         doc = SimpleNamespace(
             number=quote.number, revision=quote.revision, sent_on=quote.sent_on, valid_until=quote.valid_until,
-            salesperson=quote.salesperson, total_price=quote.total_price, deposit_percent=quote.deposit_percent,
+            salesperson=quote.salesperson_name, total_price=quote.total_price, deposit_percent=quote.deposit_percent,
             deposit_due=quote.deposit_due, system_types=[SimpleNamespace(name=t.name) for t in quote.system_types.all()],
             superseded=False,
         )
@@ -255,7 +258,7 @@ def quote_document_data(quote, revision=None):
     ]
     doc = SimpleNamespace(
         number=quote.number, revision=snap["revision"], sent_on=parse_datetime(snap["sent_on"]) if snap["sent_on"] else None,
-        valid_until=parse_date(snap["valid_until"]) if snap["valid_until"] else None, salesperson=quote.salesperson,
+        valid_until=parse_date(snap["valid_until"]) if snap["valid_until"] else None, salesperson=quote.salesperson_name,
         total_price=Decimal(snap["total"]), deposit_percent=Decimal(snap["deposit_percent"]),
         deposit_due=Decimal(snap["deposit_due"]), system_types=[SimpleNamespace(name=n) for n in snap["system_types"]],
         superseded=True,
@@ -325,6 +328,11 @@ class QuoteAdmin(ModelAdmin):
         ]
         return custom + super().get_urls()
 
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+        initial.setdefault("salesperson", request.user.pk)
+        return initial
+
     @display(
         description="Stage", ordering="stage",
         label={"new_lead": "info", "quote_sent": "warning", "approved": "info", "deposit": "info", "sent_to_ops": "success", "lost": "danger"},
@@ -336,22 +344,33 @@ class QuoteAdmin(ModelAdmin):
     def ops_label(self, obj):
         return (obj.ops_status, obj.get_ops_status_display()) if obj.ops_status else ("", "-")
 
-    @action(
-        description="New lead", icon="person_add", variant=ActionVariant.PRIMARY,
-        permissions=["crm.add_customer", "crm.add_site", "crm.add_quote"],
-    )
+    # Unfold actions take permission methods, not "app.codename" strings: a dotted name makes its startup
+    # check query the database, which fails on a brand new one.
+    def has_new_lead_permission(self, request):
+        return all(request.user.has_perm(p) for p in ("crm.add_customer", "crm.add_site", "crm.add_quote"))
+
+    def has_customer_overview_permission(self, request, object_id=None):
+        return request.user.has_perm("crm.view_customer")
+
+    def has_printable_permission(self, request, object_id=None):
+        return request.user.has_perm("crm.view_quote")
+
+    def has_revise_permission(self, request, object_id=None):
+        return request.user.has_perm("crm.revise_quote")
+
+    @action(description="New lead", icon="person_add", variant=ActionVariant.PRIMARY, permissions=["new_lead"])
     def new_lead_action(self, request):
         return redirect("admin:crm_quote_new_lead")
 
-    @action(description="Customer overview", icon="dashboard", permissions=["crm.view_customer"])
+    @action(description="Customer overview", icon="dashboard", permissions=["customer_overview"])
     def customer_overview_action(self, request, object_id):
         return redirect("admin:crm_customer_overview", get_object_or_404(Quote, pk=object_id).site.customer_id)
 
-    @action(description="Printable quote", icon="print", permissions=["crm.view_quote"], attrs={"target": "_blank"})
+    @action(description="Printable quote", icon="print", permissions=["printable"], attrs={"target": "_blank"})
     def printable_action(self, request, object_id):
         return redirect("admin:crm_quote_document", object_id)
 
-    @action(description="Revise", icon="edit_note", permissions=["crm.revise_quote"])
+    @action(description="Revise", icon="edit_note", permissions=["revise"])
     def revise_action(self, request, object_id):
         return redirect("admin:crm_quote_revise", object_id)
 
@@ -359,7 +378,7 @@ class QuoteAdmin(ModelAdmin):
         needed = ("crm.add_customer", "crm.add_site", "crm.add_quote")
         if not all(request.user.has_perm(p) for p in needed):
             raise PermissionDenied
-        initial = {"salesperson": request.user.get_full_name() or request.user.get_username()}
+        initial = {"salesperson": request.user.pk}
         form = NewLeadForm(request.POST or None, initial=initial)
         if request.method == "POST" and form.is_valid():
             quote = form.save()
